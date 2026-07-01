@@ -97,7 +97,8 @@ python3 /home/lighthouse/video-benchmark/scripts/run_epic_vpn_batch.py \
   --downloader-dir /home/lighthouse/video-benchmark/data/external/epic-kitchens-download-scripts-100 \
   --python python3 \
   --cos-prefix video-benchmark/epic-kitchens \
-  --url-expire-days 30
+  --url-expire-days 30 \
+  --delete-raw-after-upload
 ```
 
 这个脚本对每个视频执行：
@@ -108,6 +109,13 @@ python3 /home/lighthouse/video-benchmark/scripts/run_epic_vpn_batch.py \
 4. 上传代理视频到 COS：`video-benchmark/epic-kitchens/Pxx/proxy_540p16/`。
 5. 写入 URL 表：`data/cos_urls/p04_phase1_proxy_540p16_urls.csv`。
 6. 写入状态表：`data/processed/epic_pipeline_runs/p04_phase1_status.csv`。
+7. 如果传入 `--delete-raw-after-upload`，上传成功并写入 URL 表后删除原始 MP4。
+
+默认不会删除代理视频，因为全量代理视频预计只有数十 GB，便于后续复查和重新生成 URL 表。如果希望 `vpn` 只作为临时加工节点，可以额外传入：
+
+```bash
+--delete-proxy-after-upload
+```
 
 断开 tmux：
 

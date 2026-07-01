@@ -26,6 +26,8 @@ STATUS_FIELDS = [
     "proxy_path",
     "proxy_size_bytes",
     "cos_key",
+    "raw_deleted",
+    "proxy_deleted",
 ]
 
 URL_FIELDS = [
@@ -226,6 +228,16 @@ def upload_proxy(client, cos: dict[str, str], path: Path, key: str, url_expire_d
     return ""
 
 
+def delete_file(path: Path, label: str, dry_run: bool) -> bool:
+    if not path.exists():
+        return False
+    print(f"Deleting {label}: {path}", flush=True)
+    if dry_run:
+        return False
+    path.unlink()
+    return True
+
+
 def select_rows(rows: list[dict[str, str]], video_ids: set[str] | None, limit: int | None) -> list[dict[str, str]]:
     selected = [row for row in rows if video_ids is None or row["video_id"] in video_ids]
     return selected[:limit] if limit is not None else selected
@@ -267,6 +279,11 @@ def process_one(
     if not args.dry_run and not proxy_path.exists():
         raise RuntimeError(f"proxy video missing after transcode: {proxy_path}")
 
+    raw_size_bytes = str(raw_path.stat().st_size if raw_path.exists() else "")
+    proxy_size_bytes = str(proxy_path.stat().st_size if proxy_path.exists() else "")
+    raw_deleted = False
+    proxy_deleted = False
+
     signed_url = ""
     if not args.skip_upload:
         if cos_client is None or cos is None:
@@ -279,12 +296,17 @@ def process_one(
             "bucket": cos["bucket"],
             "region": cos["region"],
             "key": cos_key,
-            "size_bytes": str(proxy_path.stat().st_size if proxy_path.exists() else ""),
+            "size_bytes": proxy_size_bytes,
             "content_type": content_type_for(proxy_path),
             "signed_url": signed_url,
         }
         if not args.dry_run:
             upsert_csv(args.url_csv, url_row, URL_FIELDS, ("video_id", "key"))
+        if signed_url or args.dry_run:
+            if args.delete_raw_after_upload:
+                raw_deleted = delete_file(raw_path, "raw video", args.dry_run)
+            if args.delete_proxy_after_upload:
+                proxy_deleted = delete_file(proxy_path, "proxy video", args.dry_run)
 
     return {
         "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -293,11 +315,13 @@ def process_one(
         "participant_id": participant,
         "video_id": video_id,
         "raw_path": str(raw_path),
-        "raw_size_bytes": str(raw_path.stat().st_size if raw_path.exists() else ""),
+        "raw_size_bytes": raw_size_bytes,
         "raw_md5_ok": "" if raw_md5_ok is None else str(raw_md5_ok),
         "proxy_path": str(proxy_path),
-        "proxy_size_bytes": str(proxy_path.stat().st_size if proxy_path.exists() else ""),
+        "proxy_size_bytes": proxy_size_bytes,
         "cos_key": "" if args.skip_upload else cos_key,
+        "raw_deleted": str(raw_deleted),
+        "proxy_deleted": str(proxy_deleted),
     }
 
 
@@ -314,6 +338,16 @@ def main() -> None:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--overwrite-proxy", action="store_true")
     parser.add_argument("--skip-upload", action="store_true")
+    parser.add_argument(
+        "--delete-raw-after-upload",
+        action="store_true",
+        help="Delete the original MP4 only after proxy upload and URL CSV update succeed.",
+    )
+    parser.add_argument(
+        "--delete-proxy-after-upload",
+        action="store_true",
+        help="Delete the transcoded proxy only after proxy upload and URL CSV update succeed.",
+    )
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -361,6 +395,8 @@ def main() -> None:
                 "proxy_path": "",
                 "proxy_size_bytes": "",
                 "cos_key": "",
+                "raw_deleted": "",
+                "proxy_deleted": "",
             }
             print(f"ERROR {video_id}: {exc!r}", flush=True)
             if args.fail_fast:
