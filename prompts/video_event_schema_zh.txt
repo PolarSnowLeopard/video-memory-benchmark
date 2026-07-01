@@ -1,0 +1,48 @@
+请观看这段第一人称厨房视频，输出严格 JSON，不要输出 Markdown，也不要输出额外解释。
+
+任务目标：为后续构建跨会话长期记忆 benchmark 生成可核验的视频事件表。
+
+JSON 结构：
+{
+  "video_summary": "一句话概括整段视频",
+  "scene": {
+    "location": "主要场景",
+    "stable_layout": ["反复可见且位置稳定的区域或设施"],
+    "notable_objects": ["长期记忆中值得追踪的物体"]
+  },
+  "timeline": [
+    {
+      "time_range": "MM:SS-MM:SS",
+      "action": "可见动作",
+      "objects": ["被交互物体"],
+      "location": "动作发生位置",
+      "evidence": "画面证据描述"
+    }
+  ],
+  "state_changes": [
+    {
+      "object": "物体",
+      "before": "变化前状态或位置",
+      "after": "变化后状态或位置",
+      "time_range": "MM:SS-MM:SS",
+      "evidence": "画面证据描述"
+    }
+  ],
+  "memory_candidates": [
+    {
+      "type": "persistent_fact|state_change|object_location|procedure|cross_session_candidate",
+      "fact": "适合之后跨会话提问的记忆事实",
+      "evidence_time": "MM:SS 或 MM:SS-MM:SS",
+      "question_hint": "可由该事实生成的问题"
+    }
+  ],
+  "uncertainties": ["画面不清或无法确认的点"]
+}
+
+要求：
+1. 所有事实必须来自可见画面，不要猜测不可见信息。
+2. 如果只能看出大致时间，用近似时间即可。
+3. 对跨会话记忆有价值的事实优先，包括物体位置、物体状态、用户习惯流程、重复出现的器具或区域。
+4. 如果没有明显状态变化，"state_changes" 返回空数组。
+5. 单个视频不能证明“习惯”“通常”“经常”。除非画面内多次重复出现同一模式，否则不要使用“习惯”“通常”“经常”等表述。
+6. "memory_candidates" 中的事实应写成可验证的观察，例如“本段视频中用户用条纹布覆盖面团”，不要写成“用户习惯用条纹布覆盖面团”。

@@ -1,0 +1,21 @@
+.DS_Store
+
+# External datasets and downloaded media should stay local.
+data/external/
+data/raw/
+data/videos/
+data/proxy/
+data/proxy_videos/
+data/frames/
+data/contact_sheets/
+data/cos_urls/
+data/tmp/
+data/processed/**/*download_report*.csv
+outputs/
+
+# Python cache
+__pycache__/
+*.pyc
+.venv-report/
+.venv/
+.mplcache/
