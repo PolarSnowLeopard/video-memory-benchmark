@@ -18,14 +18,17 @@ prompts/video_event_schema_zh.txt
 `vpn` 服务器：
 
 ```text
-/home/lighthouse/video-benchmark/
-  scripts/
-  manifests/
-  data/
-    raw/EPIC-KITCHENS/Pxx/videos/*.MP4
-    proxy/Pxx/*_540p16.mp4
-    cos_urls/*_proxy_540p16_urls.csv
-    processed/epic_pipeline_runs/*_status.csv
+/home/lighthouse/video-memory-benchmark/
+  GitHub 代码仓库
+
+/home/lighthouse/video-benchmark/data/
+  大文件和中间结果，不进 GitHub
+  external/epic-kitchens-download-scripts-100/
+    EPIC 官方下载脚本
+  raw/EPIC-KITCHENS/Pxx/videos/*.MP4
+  proxy/Pxx/*_540p16.mp4
+  cos_urls/*_proxy_540p16_urls.csv
+  processed/epic_pipeline_runs/*_status.csv
 ```
 
 集群：
@@ -60,7 +63,53 @@ $PY scripts/build_epic_batch_manifest.py \
   --output data/processed/epic_kitchens_100/manifests/p04_smoke.csv
 ```
 
-## 2. 同步脚本和清单到 vpn
+## 2. 准备 vpn 仓库和数据目录
+
+当前推荐让 `vpn` 直接拉 GitHub 仓库，代码和大文件分开：
+
+```bash
+ssh vpn
+cd /home/lighthouse
+
+test -d video-memory-benchmark/.git || \
+  git clone git@github.com:PolarSnowLeopard/video-memory-benchmark.git video-memory-benchmark
+
+cd /home/lighthouse/video-memory-benchmark
+git pull
+```
+
+数据目录继续使用：
+
+```text
+/home/lighthouse/video-benchmark/data
+```
+
+确认 `vpn` 上有 EPIC 官方下载脚本：
+
+```bash
+test -f /home/lighthouse/video-benchmark/data/external/epic-kitchens-download-scripts-100/epic_downloader.py && echo ok
+```
+
+确认 COS 配置存在：
+
+```bash
+test -f ~/.cos.conf && echo ok
+```
+
+如果要生成 `P02` 或其他参与者的清单，可以直接在 `vpn` 仓库里生成：
+
+```bash
+cd /home/lighthouse/video-memory-benchmark
+
+python3 scripts/build_epic_batch_manifest.py \
+  --participants P02 \
+  --uses direct_session,cut_into_sessions \
+  --output data/processed/epic_kitchens_100/manifests/p02_phase1.csv
+```
+
+## 2b. 备选：从本地同步脚本和清单到 vpn
+
+如果 `vpn` 不能访问 GitHub，再用本地 `scp` 同步：
 
 ```bash
 ssh vpn 'mkdir -p /home/lighthouse/video-benchmark/scripts /home/lighthouse/video-benchmark/manifests'
@@ -85,14 +134,16 @@ ssh vpn 'test -f /home/lighthouse/video-benchmark/data/external/epic-kitchens-do
 
 ## 3. 在 vpn 后台跑下载、转码、上传
 
-进入 tmux 后运行：
+当前推荐使用 GitHub 仓库中的脚本。进入 tmux 后运行：
 
 ```bash
 ssh vpn
 tmux new -s epic-p04
 
-python3 /home/lighthouse/video-benchmark/scripts/run_epic_vpn_batch.py \
-  --manifest /home/lighthouse/video-benchmark/manifests/p04_phase1.csv \
+cd /home/lighthouse/video-memory-benchmark
+
+python3 scripts/run_epic_vpn_batch.py \
+  --manifest data/processed/epic_kitchens_100/manifests/p04_phase1.csv \
   --data-root /home/lighthouse/video-benchmark/data \
   --downloader-dir /home/lighthouse/video-benchmark/data/external/epic-kitchens-download-scripts-100 \
   --python python3 \
@@ -129,6 +180,51 @@ Ctrl-b d
 ssh vpn 'tail -n 20 /home/lighthouse/video-benchmark/data/processed/epic_pipeline_runs/p04_phase1_status.csv'
 ```
 
+### 两个参与者并行
+
+如果单路下载没有打满公网带宽，可以用两个 tmux 会话分别跑不同参与者。这样每个参与者有独立状态表和 URL 表，避免多个进程写同一个 CSV。
+
+窗口 1 跑 `P04`：
+
+```bash
+tmux new -s epic-p04
+
+cd /home/lighthouse/video-memory-benchmark
+
+python3 scripts/run_epic_vpn_batch.py \
+  --manifest data/processed/epic_kitchens_100/manifests/p04_phase1.csv \
+  --data-root /home/lighthouse/video-benchmark/data \
+  --downloader-dir /home/lighthouse/video-benchmark/data/external/epic-kitchens-download-scripts-100 \
+  --python python3 \
+  --cos-prefix video-benchmark/epic-kitchens \
+  --url-expire-days 30 \
+  --delete-raw-after-upload
+```
+
+窗口 2 跑 `P02`：
+
+```bash
+tmux new -s epic-p02
+
+cd /home/lighthouse/video-memory-benchmark
+
+python3 scripts/run_epic_vpn_batch.py \
+  --manifest data/processed/epic_kitchens_100/manifests/p02_phase1.csv \
+  --data-root /home/lighthouse/video-benchmark/data \
+  --downloader-dir /home/lighthouse/video-benchmark/data/external/epic-kitchens-download-scripts-100 \
+  --python python3 \
+  --cos-prefix video-benchmark/epic-kitchens \
+  --url-expire-days 30 \
+  --delete-raw-after-upload
+```
+
+查看两个进度：
+
+```bash
+tail -n 20 /home/lighthouse/video-benchmark/data/processed/epic_pipeline_runs/p04_phase1_status.csv
+tail -n 20 /home/lighthouse/video-benchmark/data/processed/epic_pipeline_runs/p02_phase1_status.csv
+```
+
 ## 4. 把 URL 表交给集群
 
 等 `vpn` 端至少完成几个视频后，把 URL 表上传到 COS，生成可下载链接：
@@ -136,7 +232,7 @@ ssh vpn 'tail -n 20 /home/lighthouse/video-benchmark/data/processed/epic_pipelin
 ```bash
 ssh vpn
 
-python3 /home/lighthouse/video-benchmark/scripts/upload_epic_to_cos.py \
+python3 /home/lighthouse/video-memory-benchmark/scripts/upload_epic_to_cos.py \
   --prefix video-benchmark/cluster_inputs \
   --url-expire-days 30 \
   --output-csv /home/lighthouse/video-benchmark/data/cos_urls/p04_phase1_url_csv_download.csv \
@@ -144,6 +240,16 @@ python3 /home/lighthouse/video-benchmark/scripts/upload_epic_to_cos.py \
 ```
 
 `p04_phase1_url_csv_download.csv` 里的 `signed_url` 就是集群下载 URL 表的链接。
+
+如果同时跑了 `P02`，对应再上传一次：
+
+```bash
+python3 /home/lighthouse/video-memory-benchmark/scripts/upload_epic_to_cos.py \
+  --prefix video-benchmark/cluster_inputs \
+  --url-expire-days 30 \
+  --output-csv /home/lighthouse/video-benchmark/data/cos_urls/p02_phase1_url_csv_download.csv \
+  /home/lighthouse/video-benchmark/data/cos_urls/p02_phase1_proxy_540p16_urls.csv
+```
 
 ## 5. 集群批量调用 VLM
 
