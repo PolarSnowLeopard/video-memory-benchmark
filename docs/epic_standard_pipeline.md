@@ -225,6 +225,85 @@ tail -n 20 /home/lighthouse/video-benchmark/data/processed/epic_pipeline_runs/p0
 tail -n 20 /home/lighthouse/video-benchmark/data/processed/epic_pipeline_runs/p02_phase1_status.csv
 ```
 
+### 五路参与者队列
+
+如果要持续跑很多参与者，推荐使用队列脚本，让它最多同时启动 5 个参与者任务。某个参与者跑完后，脚本会自动启动下一个参与者。
+
+注意：不要让队列和手动 tmux 任务同时处理同一个参与者，否则会重复下载同一批视频。如果 `P04` 或 `P02` 已经在单独窗口里跑，要么等它们结束，要么在队列的 `--participants` 里排除它们。
+
+先跑筛选后的候选视频：
+
+```bash
+tmux new -s epic-queue-candidates
+
+cd /home/lighthouse/video-memory-benchmark
+git pull
+
+python3 scripts/run_epic_vpn_participant_queue.py \
+  --participants all-candidates \
+  --selection candidates \
+  --max-workers 5 \
+  --data-root /home/lighthouse/video-benchmark/data \
+  --downloader-dir /home/lighthouse/video-benchmark/data/external/epic-kitchens-download-scripts-100 \
+  --python python3 \
+  --cos-prefix video-benchmark/epic-kitchens \
+  --url-expire-days 30 \
+  --run-name epic_candidates_5w
+```
+
+如果要跑 EPIC-KITCHENS-100 全部 700 个视频，用：
+
+```bash
+tmux new -s epic-queue-all
+
+cd /home/lighthouse/video-memory-benchmark
+git pull
+
+python3 scripts/run_epic_vpn_participant_queue.py \
+  --participants all \
+  --selection all-videos \
+  --max-workers 5 \
+  --data-root /home/lighthouse/video-benchmark/data \
+  --downloader-dir /home/lighthouse/video-benchmark/data/external/epic-kitchens-download-scripts-100 \
+  --python python3 \
+  --cos-prefix video-benchmark/epic-kitchens \
+  --url-expire-days 30 \
+  --run-name epic100_all_5w
+```
+
+队列脚本默认会在代理视频上传成功后删除原始 MP4，并保留 `540p16` 代理视频。如果需要保留原片，额外加：
+
+```bash
+--keep-raw
+```
+
+五路并行时，每个转码进程默认使用 2 个 `ffmpeg` 线程。8 核机器上这是比较稳妥的起点。如果 CPU 长期很低，可以改成：
+
+```bash
+--ffmpeg-threads 3
+```
+
+队列状态：
+
+```bash
+tail -n 20 /home/lighthouse/video-benchmark/data/processed/epic_pipeline_runs/epic100_all_5w_status.csv
+```
+
+单个参与者日志：
+
+```bash
+tail -f /home/lighthouse/video-benchmark/data/processed/epic_pipeline_runs/epic100_all_5w_logs/P04.log
+```
+
+单个参与者的批处理状态和 URL 表仍然会分开写，例如：
+
+```text
+/home/lighthouse/video-benchmark/data/processed/epic_pipeline_runs/p04_all_videos_status.csv
+/home/lighthouse/video-benchmark/data/cos_urls/p04_all_videos_proxy_540p16_urls.csv
+```
+
+重新运行队列时，已经同时满足“状态为 `ok`”和“URL 表已有链接”的视频会跳过，不会因为原片已删除而重新下载。
+
 ## 4. 把 URL 表交给集群
 
 等 `vpn` 端至少完成几个视频后，把 URL 表上传到 COS，生成可下载链接：
@@ -249,6 +328,31 @@ python3 /home/lighthouse/video-memory-benchmark/scripts/upload_epic_to_cos.py \
   --url-expire-days 30 \
   --output-csv /home/lighthouse/video-benchmark/data/cos_urls/p02_phase1_url_csv_download.csv \
   /home/lighthouse/video-benchmark/data/cos_urls/p02_phase1_proxy_540p16_urls.csv
+```
+
+如果用五路队列跑全量，可以先合并所有参与者 URL 表，再上传给集群：
+
+```bash
+cd /home/lighthouse/video-benchmark/data/cos_urls
+
+out=epic100_all_videos_proxy_540p16_urls.csv
+first=1
+rm -f "$out"
+
+for f in p*_all_videos_proxy_540p16_urls.csv; do
+  if [ "$first" = 1 ]; then
+    cat "$f" > "$out"
+    first=0
+  else
+    tail -n +2 "$f" >> "$out"
+  fi
+done
+
+python3 /home/lighthouse/video-memory-benchmark/scripts/upload_epic_to_cos.py \
+  --prefix video-benchmark/cluster_inputs \
+  --url-expire-days 30 \
+  --output-csv /home/lighthouse/video-benchmark/data/cos_urls/epic100_all_videos_url_csv_download.csv \
+  /home/lighthouse/video-benchmark/data/cos_urls/epic100_all_videos_proxy_540p16_urls.csv
 ```
 
 ## 5. 集群批量调用 VLM

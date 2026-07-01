@@ -132,31 +132,35 @@ def download_video(
     )
 
 
-def transcode_proxy(raw_path: Path, proxy_path: Path, dry_run: bool) -> None:
+def transcode_proxy(raw_path: Path, proxy_path: Path, ffmpeg_threads: int, dry_run: bool) -> None:
     proxy_path.parent.mkdir(parents=True, exist_ok=True)
-    run(
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(raw_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-vf",
+        "scale=-2:540,fps=16",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "28",
+        "-pix_fmt",
+        "yuv420p",
+    ]
+    if ffmpeg_threads > 0:
+        cmd.extend(["-threads", str(ffmpeg_threads)])
+    cmd.extend(
         [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-i",
-            str(raw_path),
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a:0?",
-            "-vf",
-            "scale=-2:540,fps=16",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "28",
-            "-pix_fmt",
-            "yuv420p",
             "-c:a",
             "aac",
             "-b:a",
@@ -164,9 +168,9 @@ def transcode_proxy(raw_path: Path, proxy_path: Path, dry_run: bool) -> None:
             "-movflags",
             "+faststart",
             str(proxy_path),
-        ],
-        dry_run=dry_run,
+        ]
     )
+    run(cmd, dry_run=dry_run)
 
 
 def read_cos_config(path: Path) -> dict[str, str]:
@@ -243,6 +247,18 @@ def select_rows(rows: list[dict[str, str]], video_ids: set[str] | None, limit: i
     return selected[:limit] if limit is not None else selected
 
 
+def completed_video_ids(status_csv: Path, url_csv: Path, skip_upload: bool) -> set[str]:
+    if not status_csv.exists():
+        return set()
+    ok_ids = {row["video_id"] for row in read_csv(status_csv) if row.get("status") == "ok" and row.get("video_id")}
+    if skip_upload:
+        return ok_ids
+    if not url_csv.exists():
+        return set()
+    uploaded_ids = {row["video_id"] for row in read_csv(url_csv) if row.get("signed_url") and row.get("video_id")}
+    return ok_ids & uploaded_ids
+
+
 def process_one(
     row: dict[str, str],
     args: argparse.Namespace,
@@ -275,7 +291,7 @@ def process_one(
                 raise RuntimeError(f"raw MD5 still mismatched after redownload: {raw_path}")
 
     if args.overwrite_proxy or not proxy_path.exists():
-        transcode_proxy(raw_path, proxy_path, args.dry_run)
+        transcode_proxy(raw_path, proxy_path, args.ffmpeg_threads, args.dry_run)
     if not args.dry_run and not proxy_path.exists():
         raise RuntimeError(f"proxy video missing after transcode: {proxy_path}")
 
@@ -337,6 +353,7 @@ def main() -> None:
     parser.add_argument("--video-ids", help="Comma-separated subset from manifest")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--overwrite-proxy", action="store_true")
+    parser.add_argument("--ffmpeg-threads", type=int, default=0, help="Threads per ffmpeg transcode. 0 lets ffmpeg choose.")
     parser.add_argument("--skip-upload", action="store_true")
     parser.add_argument(
         "--delete-raw-after-upload",
@@ -348,11 +365,14 @@ def main() -> None:
         action="store_true",
         help="Delete the transcoded proxy only after proxy upload and URL CSV update succeed.",
     )
+    parser.add_argument("--rerun-completed", action="store_true", help="Reprocess videos already marked ok in status and URL CSVs.")
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     args.manifest = Path(args.manifest)
+    if args.ffmpeg_threads < 0:
+        raise SystemExit("--ffmpeg-threads must be >= 0")
     args.data_root = Path(args.data_root)
     args.raw_root = args.data_root / "raw"
     args.proxy_root = args.data_root / "proxy"
@@ -376,9 +396,15 @@ def main() -> None:
     print(f"Selected videos: {len(rows)}", flush=True)
     print(f"Status CSV: {args.status_csv}", flush=True)
     print(f"URL CSV: {args.url_csv}", flush=True)
+    completed = set() if args.rerun_completed else completed_video_ids(args.status_csv, args.url_csv, args.skip_upload)
+    if completed:
+        print(f"Already completed videos: {len(completed)}", flush=True)
 
     for idx, row in enumerate(rows, start=1):
         video_id = row["video_id"]
+        if video_id in completed:
+            print(f"\n[{idx}/{len(rows)}] {video_id} already completed; skipping.", flush=True)
+            continue
         print(f"\n[{idx}/{len(rows)}] {video_id}", flush=True)
         try:
             status = process_one(row, args, epic55_splits, md5s, cos_client, cos)

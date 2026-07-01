@@ -10,6 +10,7 @@ data/frames/
 data/contact_sheets/
 data/cos_urls/
 data/tmp/
+data/processed/epic_kitchens_100/manifests/queue/
 data/processed/**/*download_report*.csv
 outputs/
 
