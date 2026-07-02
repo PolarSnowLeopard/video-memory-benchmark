@@ -217,14 +217,14 @@ python scripts/qwen_video_batch.py \
   --prompt-file prompts/video_event_schema_zh.txt \
   --output-dir outputs/p04_phase1 \
   --fps 1 \
-  --max-tokens 4096
+  --max-tokens 8192
 ```
 
 ### 阶段 4：Benchmark 构建
 
 还未实现，建议下一步定义：
 
-- `video_event` schema；
+- 单视频状态图增量 schema；
 - `memory_candidate` schema；
 - `cross_session_memory` schema；
 - `benchmark_question` schema；

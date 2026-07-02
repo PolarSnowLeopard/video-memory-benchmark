@@ -380,7 +380,7 @@ python qwen_video_batch.py \
   --prompt-file video_event_schema_zh.txt \
   --output-dir outputs/p04_phase1 \
   --fps 1 \
-  --max-tokens 4096
+  --max-tokens 8192
 ```
 
 输出：
@@ -402,7 +402,7 @@ python qwen_video_batch.py \
   --output-dir outputs/p04_phase1 \
   --video-ids P04_29 \
   --fps 1 \
-  --max-tokens 8192 \
+  --max-tokens 12288 \
   --overwrite
 ```
 

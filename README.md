@@ -84,7 +84,7 @@ python qwen_video_batch.py \
   --prompt-file video_event_schema_zh.txt \
   --output-dir outputs/p04_phase1 \
   --fps 1 \
-  --max-tokens 4096
+  --max-tokens 8192
 ```
 
 更完整的命令见 [docs/epic_standard_pipeline.md](docs/epic_standard_pipeline.md)。
@@ -95,7 +95,7 @@ python qwen_video_batch.py \
 - `scripts/build_epic_batch_manifest.py`：按参与者或视频编号生成批处理 manifest。
 - `scripts/run_epic_vpn_batch.py`：下载原始视频、转码代理视频、上传 COS、写状态表。
 - `scripts/upload_epic_to_cos.py`：上传任意文件到腾讯云 COS 并生成签名 URL 表。
-- `scripts/qwen_video_batch.py`：按 URL 表批量调用 OpenAI 兼容 VLM 服务。
+- `scripts/qwen_video_batch.py`：按 URL 表批量调用 OpenAI 兼容 VLM 服务，输出单视频状态图增量 JSON。
 - `scripts/qwen_video_probe.py`：单视频调试用。
 - `scripts/extract_qwen_json.py`：从原始模型响应中抽取干净 JSON。
 - `scripts/prepare_qwen_cluster_bundle.py`：生成集群最小运行包。

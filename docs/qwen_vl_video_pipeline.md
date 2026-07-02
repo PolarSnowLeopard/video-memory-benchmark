@@ -151,7 +151,7 @@ python -m sglang.launch_server \
   "role": "user",
   "content": [
     {"type": "video_url", "video_url": {"url": "..."}},
-    {"type": "text", "text": "请输出结构化事件表"}
+    {"type": "text", "text": "请输出单视频状态图增量 JSON"}
   ]
 }
 ```
@@ -174,15 +174,18 @@ python scripts/qwen_video_probe.py \
 
 如果是在集群节点上调用，需要先把 `p04_proxy_cos_urls.csv` 和 `qwen_video_probe.py` 复制过去。
 
-## 第一轮标注建议
+## 第一轮抽取建议
 
-第一轮不要让模型直接生成 benchmark 问题。先让模型输出结构化事件表：
+第一轮不要让模型直接生成 benchmark 问题。先让模型输出单视频状态图增量 JSON：
 
-- 场景摘要；
-- 关键动作；
-- 被交互物体；
-- 物体位置变化；
-- 食材或工具状态变化；
-- 可作为跨会话记忆的问题候选。
+- 场景、地点、稳定布局；
+- 可跨会话追踪的物体和人物；
+- 关键事件和任务片段；
+- 物体位置、开关、覆盖、清洁、满空、完成度等状态；
+- 状态变化的生效时间和覆盖时间；
+- 证据索引和不确定项；
+- 可用于后续跨会话聚合的候选记忆锚点。
 
-等事件表稳定后，再由第二步脚本生成跨会话问题和证据链。
+详细提示词在 `prompts/video_event_schema_zh.txt`。由于状态图字段比旧版事件表更长，批量调用建议从 `--max-tokens 8192` 起步；如果 `batch_status.csv` 中出现 `finish_reason=length`，对对应视频用 `--max-tokens 12288 --overwrite` 重跑。
+
+等单视频状态图增量稳定后，再由第二步脚本做同一参与者内的实体对齐、状态覆盖、跨会话问题生成和证据链构造。

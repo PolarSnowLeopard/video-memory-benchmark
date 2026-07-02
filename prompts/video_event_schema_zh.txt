@@ -1,48 +1,201 @@
-请观看这段第一人称厨房视频，输出严格 JSON，不要输出 Markdown，也不要输出额外解释。
+请观看这段第一人称视频，输出严格 JSON，不要输出 Markdown，不要输出额外解释。
 
-任务目标：为后续构建跨会话长期记忆 benchmark 生成可核验的视频事件表。
+任务目标：为后续构建“跨会话长期记忆 benchmark”生成可核验的单视频状态图增量。你不是在生成最终 benchmark 标注，也不是在生成问题；你是在从单个视频中提取可被后续程序聚合、核验、人工抽查的候选事实。
 
-JSON 结构：
+核心原则：
+1. 所有事实必须来自视频中可见画面、可听音频或可读文字。不要猜测画面外信息。
+2. 单个视频不能证明“习惯”“通常”“经常”。除非同一模式在本视频内多次重复出现，否则只能写成“本段视频中观察到……”。
+3. 区分“直接观察”和“合理推断”。看不清、听不清、无法确认时写入不确定项，不要硬猜。
+4. 优先提取可跨会话追踪的信息：稳定地点、固定布局、可识别物体、物体位置、物体状态、状态变化、流程步骤、可复核证据。
+5. 不要逐帧罗列微小动作。把连续、目标一致的动作合并成事件，但不要漏掉会改变状态、位置或任务进度的关键动作。
+6. 若某字段没有内容，返回空数组或 null。不要为了填满 schema 编造内容。
+7. 时间使用 "MM:SS" 或 "MM:SS-MM:SS"。如果只能估计，仍给出近似时间，并在 confidence 中体现不确定性。
+8. 每个视频内部给实体稳定编号。相同物体在本视频多次出现时复用同一个编号；多个相似物体要用颜色、形状、位置、用途区分。
+
+输出 JSON 结构如下，字段名必须保持一致：
+
 {
-  "video_summary": "一句话概括整段视频",
-  "scene": {
-    "location": "主要场景",
-    "stable_layout": ["反复可见且位置稳定的区域或设施"],
-    "notable_objects": ["长期记忆中值得追踪的物体"]
+  "video_summary": "一句话概括本视频中发生的主要任务和状态变化",
+  "modality_evidence": {
+    "visual": true,
+    "audio": false,
+    "ocr": false,
+    "notes": "说明是否使用了画面、音频、文字证据；没有就写 null"
   },
-  "timeline": [
+  "scene_graph": {
+    "places": [
+      {
+        "place_id": "place_1",
+        "name": "地点或区域名称，例如厨房操作台、水槽、炉灶、烤箱",
+        "parent_place": "更大地点，无法判断则 null",
+        "visual_anchors": ["用于跨会话识别该地点的视觉线索"],
+        "evidence_times": ["MM:SS"],
+        "confidence": "high|medium|low"
+      }
+    ],
+    "actors": [
+      {
+        "actor_id": "actor_1",
+        "description": "可见人物描述，例如第一人称拍摄者、画面中出现的另一人；无人则空数组",
+        "role": "camera_wearer|other_person|unknown",
+        "evidence_times": ["MM:SS"],
+        "confidence": "high|medium|low"
+      }
+    ],
+    "objects": [
+      {
+        "object_id": "obj_1",
+        "name": "物体名称",
+        "category": "food|container|tool|appliance|furniture|clothing|document|device|other",
+        "distinctive_attributes": ["颜色、形状、材质、文字、品牌、大小、位置等可追踪特征"],
+        "initial_observed_location": "首次清楚出现时的位置；无法判断则 null",
+        "final_observed_location": "最后清楚出现时的位置；无法判断则 null",
+        "initial_observed_state": "首次清楚出现时的状态；无法判断则 null",
+        "final_observed_state": "最后清楚出现时的状态；无法判断则 null",
+        "first_seen": "MM:SS",
+        "last_seen": "MM:SS",
+        "trackability": "high|medium|low",
+        "evidence_times": ["MM:SS"],
+        "confidence": "high|medium|low"
+      }
+    ],
+    "stable_layout_relations": [
+      {
+        "relation_id": "layout_1",
+        "subject_id": "place_1 或 obj_1",
+        "relation": "left_of|right_of|above|below|inside|on|under|next_to|attached_to|part_of|same_area_as|other",
+        "object_id": "place_2 或 obj_2",
+        "description": "关系的自然语言描述",
+        "evidence_times": ["MM:SS"],
+        "confidence": "high|medium|low"
+      }
+    ]
+  },
+  "task_segments": [
     {
+      "task_id": "task_1",
       "time_range": "MM:SS-MM:SS",
-      "action": "可见动作",
-      "objects": ["被交互物体"],
-      "location": "动作发生位置",
-      "evidence": "画面证据描述"
+      "task_name": "本段任务，例如准备食材、清洁台面、烹饪、收纳、维修、出门准备",
+      "goal_or_intent": "只能根据画面推断的任务目标；不确定则 null",
+      "place_ids": ["place_1"],
+      "object_ids": ["obj_1"],
+      "evidence": "支持该任务划分的画面、音频或文字证据",
+      "confidence": "high|medium|low"
+    }
+  ],
+  "timeline_events": [
+    {
+      "event_id": "event_1",
+      "time_range": "MM:SS-MM:SS",
+      "actor_id": "actor_1 或 unknown",
+      "action_type": "move|pick_up|put_down|open|close|clean|cut|mix|cook|pour|wash|cover|uncover|search|inspect|repair|discard|store|retrieve|handover|other",
+      "action": "可见动作的具体描述",
+      "place_id": "place_1 或 null",
+      "object_ids": ["obj_1"],
+      "pre_state": "动作前相关状态；无法判断则 null",
+      "post_state": "动作后相关状态；无法判断则 null",
+      "evidence": "画面、音频或文字证据描述",
+      "confidence": "high|medium|low"
+    }
+  ],
+  "state_observations": [
+    {
+      "observation_id": "obs_1",
+      "time_range": "MM:SS 或 MM:SS-MM:SS",
+      "entity_id": "obj_1 或 place_1 或 actor_1",
+      "attribute": "location|container|open_closed|on_off|cleanliness|fullness|quantity|assembled|damaged|covered|temperature_visible|task_progress|ownership_or_user_association|other",
+      "value": "观察到的属性值",
+      "observation_type": "direct|inferred",
+      "valid_from": "该状态在本视频中开始成立的时间；无法判断则 null",
+      "valid_until": "该状态在本视频中被覆盖的时间；没有被覆盖则 unknown",
+      "evidence": "证据描述",
+      "confidence": "high|medium|low"
     }
   ],
   "state_changes": [
     {
-      "object": "物体",
-      "before": "变化前状态或位置",
-      "after": "变化后状态或位置",
+      "change_id": "change_1",
       "time_range": "MM:SS-MM:SS",
-      "evidence": "画面证据描述"
+      "entity_id": "obj_1 或 place_1",
+      "attribute": "location|container|open_closed|on_off|cleanliness|fullness|quantity|assembled|damaged|covered|task_progress|other",
+      "before": "变化前状态或位置；如果开始前不可见，写 unknown",
+      "after": "变化后状态或位置",
+      "trigger_event_id": "event_1 或 null",
+      "valid_from": "变化完成并开始成立的时间",
+      "valid_until": "本视频中被后续事件覆盖的时间；没有被覆盖则 unknown",
+      "evidence": "证据描述",
+      "confidence": "high|medium|low"
     }
   ],
-  "memory_candidates": [
+  "object_relations": [
     {
-      "type": "persistent_fact|state_change|object_location|procedure|cross_session_candidate",
-      "fact": "适合之后跨会话提问的记忆事实",
-      "evidence_time": "MM:SS 或 MM:SS-MM:SS",
-      "question_hint": "可由该事实生成的问题"
+      "relation_id": "rel_1",
+      "time_range": "MM:SS 或 MM:SS-MM:SS",
+      "subject_id": "obj_1",
+      "relation": "inside|on|under|next_to|held_by|covered_by|contains|used_with|moved_to|removed_from|other",
+      "object_id": "obj_2 或 place_1",
+      "evidence": "证据描述",
+      "confidence": "high|medium|low"
     }
   ],
-  "uncertainties": ["画面不清或无法确认的点"]
+  "procedure_candidates": [
+    {
+      "procedure_id": "proc_1",
+      "name": "可复用流程名称，例如揉面流程、清洗餐具流程、烤箱取放流程",
+      "scope": "single_video_only|repeated_within_video",
+      "steps": [
+        {
+          "step_id": "step_1",
+          "event_id": "event_1 或 null",
+          "time_range": "MM:SS-MM:SS",
+          "action": "步骤描述",
+          "object_ids": ["obj_1"],
+          "resulting_state": "该步骤造成的结果状态；无则 null"
+        }
+      ],
+      "evidence_times": ["MM:SS-MM:SS"],
+      "why_useful_for_memory": "为什么后续跨会话可能值得验证",
+      "confidence": "high|medium|low"
+    }
+  ],
+  "cross_session_memory_candidates": [
+    {
+      "candidate_id": "mem_1",
+      "type": "stable_layout|object_location|object_state|state_to_verify_later|procedure_candidate|preference_candidate|routine_candidate|anomaly_or_change_candidate",
+      "claim": "只写本视频可支持的观察事实，不要写成长期结论",
+      "entity_ids": ["obj_1", "place_1"],
+      "attribute": "被记忆的属性，例如位置、状态、流程、布局",
+      "observed_value": "本视频观察到的值",
+      "evidence_times": ["MM:SS"],
+      "why_useful": "它如何帮助构造跨会话记忆问题或状态图",
+      "validation_needed": "后续需要在其他视频中验证什么",
+      "confidence": "high|medium|low"
+    }
+  ],
+  "evidence_index": [
+    {
+      "evidence_id": "evi_1",
+      "time_range": "MM:SS 或 MM:SS-MM:SS",
+      "modality": "visual|audio|ocr",
+      "description": "最关键证据的简短描述",
+      "linked_items": ["event_1", "change_1", "mem_1"]
+    }
+  ],
+  "uncertainties": [
+    {
+      "time_range": "MM:SS 或 MM:SS-MM:SS",
+      "item": "无法确认的实体、动作、文字、声音或状态",
+      "reason": "不确定原因，例如遮挡、模糊、离镜头太远、音频不可辨认",
+      "impact": "该不确定性会影响哪些状态或候选记忆"
+    }
+  ]
 }
 
-要求：
-1. 所有事实必须来自可见画面，不要猜测不可见信息。
-2. 如果只能看出大致时间，用近似时间即可。
-3. 对跨会话记忆有价值的事实优先，包括物体位置、物体状态、用户习惯流程、重复出现的器具或区域。
-4. 如果没有明显状态变化，"state_changes" 返回空数组。
-5. 单个视频不能证明“习惯”“通常”“经常”。除非画面内多次重复出现同一模式，否则不要使用“习惯”“通常”“经常”等表述。
-6. "memory_candidates" 中的事实应写成可验证的观察，例如“本段视频中用户用条纹布覆盖面团”，不要写成“用户习惯用条纹布覆盖面团”。
+抽取重点：
+1. 对长期记忆最有价值的是“状态”和“状态变化”，而不是普通动作摘要。
+2. 尽量记录物体最终位置和最终状态，因为这些常用于跨会话追问。
+3. 对厨房类视频，重点关注台面、水槽、炉灶、烤箱、冰箱、柜子、餐具、食材、容器、清洁用品、正在烹饪或处理的食物。
+4. 如果视频中出现文字、标签、屏幕或包装信息，放入 evidence_index，并在相关实体中记录 distinctive_attributes。
+5. 如果音频能提供动作、物体、人物或环境信息，记录 modality_evidence.audio=true；否则保持 false。
+6. cross_session_memory_candidates 只能是候选，不要声称长期稳定。正确写法：“本视频中，蓝色杯子最后位于水槽旁台面”；错误写法：“用户总是把蓝色杯子放在水槽旁”。
+7. 输出必须是一个可被 json.loads 解析的 JSON 对象。

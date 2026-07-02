@@ -28,7 +28,7 @@ python qwen_video_probe.py \\
   --signed-url-csv p04_proxy_cos_urls.csv \\
   --video-id "$VIDEO_ID" \\
   --fps "${FPS:-1}" \\
-  --max-tokens "${MAX_TOKENS:-4096}" \\
+  --max-tokens "${MAX_TOKENS:-8192}" \\
   --prompt "$(cat video_event_schema_zh.txt)" \\
   --output-json "outputs/${VIDEO_ID}.json"
 """
@@ -42,7 +42,7 @@ README = """# Qwen 集群视频输入试跑包
 - `qwen_video_batch.py`：按 COS URL 表批量调用视频模型。
 - `extract_qwen_json.py`：从原始响应中抽取并校验干净 JSON。
 - `p04_proxy_cos_urls.csv`：540p 代理视频的 COS 签名 URL。
-- `video_event_schema_zh.txt`：第一轮结构化事件表提示词。
+- `video_event_schema_zh.txt`：第一轮单视频状态图增量提示词。
 - `run_probe.sh`：示例调用脚本。
 
 用法：
@@ -53,7 +53,7 @@ BASE_URL=http://127.0.0.1:8000/v1 \\
 MODEL=Qwen/Qwen3-VL-32B-Instruct \\
 VIDEO_ID=P04_106 \\
 FPS=1 \\
-MAX_TOKENS=4096 \\
+MAX_TOKENS=8192 \\
 ./run_probe.sh
 ```
 
@@ -73,7 +73,7 @@ python qwen_video_batch.py \
   --prompt-file video_event_schema_zh.txt \
   --output-dir outputs \
   --fps 1 \
-  --max-tokens 4096
+  --max-tokens 8192
 ```
 
 如果你用 `Qwen/Qwen3.5-35B-A3B`，先把 `MODEL` 改掉。若服务端不接受 `video_url`，先用 Qwen3-VL 跑通视频链路，再回到 3.5 A3B 做 image/frame 输入兼容。

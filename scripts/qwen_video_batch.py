@@ -122,7 +122,7 @@ def main() -> None:
     parser.add_argument("--prompt-file", default="video_event_schema_zh.txt")
     parser.add_argument("--output-dir", default="outputs")
     parser.add_argument("--fps", type=float, default=1.0)
-    parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--max-tokens", type=int, default=8192)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--video-ids", help="Comma-separated subset from URL CSV")
     parser.add_argument("--limit", type=int)
