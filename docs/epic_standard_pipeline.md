@@ -321,6 +321,18 @@ session 长度：300 秒
 2. 按固定长度切成本地 session clip，并生成本地 HTTP URL 表。
 3. 用本地 HTTP 服务把 session clip 提供给 vLLM。
 
+先确认集群上有 `ffmpeg`：
+
+```bash
+which ffmpeg || python3 -m pip install imageio-ffmpeg
+```
+
+脚本会优先使用系统 `ffmpeg`；如果没有，会尝试使用 `imageio-ffmpeg` 包内置的 binary。也可以显式指定：
+
+```bash
+--ffmpeg-bin /path/to/ffmpeg
+```
+
 以 `P30` 的 5 分钟切分为例：
 
 ```bash

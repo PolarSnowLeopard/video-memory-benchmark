@@ -8,6 +8,8 @@ import configparser
 import csv
 import math
 import mimetypes
+import os
+import shutil
 import subprocess
 import sys
 import urllib.request
@@ -119,10 +121,33 @@ def run(cmd: list[str], dry_run: bool = False) -> None:
     subprocess.run(cmd, check=True)
 
 
+def resolve_binary(name: str, configured: str | None, env_name: str, dry_run: bool = False) -> str:
+    if configured:
+        return configured
+    env_value = os.environ.get(env_name)
+    if env_value:
+        return env_value
+    found = shutil.which(name)
+    if found:
+        return found
+    if dry_run:
+        return name
+    if name == "ffmpeg":
+        try:
+            import imageio_ffmpeg
+
+            return imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            pass
+    raise FileNotFoundError(
+        f"Cannot find {name}. Install ffmpeg, set {env_name}, or pass --{name}-bin."
+    )
+
+
 def ffprobe_duration(path: Path) -> float:
     result = subprocess.run(
         [
-            "ffprobe",
+            ffprobe_duration.ffprobe_bin,
             "-v",
             "error",
             "-show_entries",
@@ -136,6 +161,9 @@ def ffprobe_duration(path: Path) -> float:
         text=True,
     )
     return float(result.stdout.strip())
+
+
+ffprobe_duration.ffprobe_bin = "ffprobe"  # type: ignore[attr-defined]
 
 
 def metadata_durations(path: Path) -> dict[str, float]:
@@ -199,7 +227,7 @@ def cut_session(source_path: Path, output_path: Path, start_sec: float, duration
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if args.cut_mode == "copy":
         cmd = [
-            "ffmpeg",
+            args.ffmpeg_bin,
             "-hide_banner",
             "-loglevel",
             "error",
@@ -224,7 +252,7 @@ def cut_session(source_path: Path, output_path: Path, start_sec: float, duration
         ]
     else:
         cmd = [
-            "ffmpeg",
+            args.ffmpeg_bin,
             "-hide_banner",
             "-loglevel",
             "error",
@@ -451,6 +479,8 @@ def main() -> None:
         help="Emit local HTTP URLs instead of uploading sessions, e.g. http://127.0.0.1:18080.",
     )
     parser.add_argument("--cut-mode", choices=["copy", "reencode"], default="copy")
+    parser.add_argument("--ffmpeg-bin", help="Path to ffmpeg. Defaults to PATH, FFMPEG_BIN, then imageio-ffmpeg.")
+    parser.add_argument("--ffprobe-bin", help="Path to ffprobe. Defaults to PATH or FFPROBE_BIN.")
     parser.add_argument("--ffmpeg-threads", type=int, default=2)
     parser.add_argument("--video-ids", help="Comma-separated source video ids to process.")
     parser.add_argument("--limit-videos", type=int)
@@ -476,6 +506,9 @@ def main() -> None:
     args.data_root = Path(args.data_root)
     args.session_root = args.data_root / "sessions"
     args.source_cache_root = Path(args.source_cache_root) if args.source_cache_root else None
+    args.ffmpeg_bin = resolve_binary("ffmpeg", args.ffmpeg_bin, "FFMPEG_BIN", args.dry_run)
+    if args.ffprobe_bin or shutil.which("ffprobe") or os.environ.get("FFPROBE_BIN"):
+        ffprobe_duration.ffprobe_bin = resolve_binary("ffprobe", args.ffprobe_bin, "FFPROBE_BIN", args.dry_run)  # type: ignore[attr-defined]
     args.cos_config = Path(args.cos_config).expanduser()
     metadata_csv = Path(args.metadata_csv)
     durations = metadata_durations(metadata_csv)
