@@ -6,8 +6,11 @@ data/raw/
 data/videos/
 data/proxy/
 data/proxy_videos/
+data/proxy_from_cos/
+data/sessions/
 data/frames/
 data/contact_sheets/
+data/cluster_inputs/
 data/cos_urls/
 data/tmp/
 data/processed/epic_kitchens_100/manifests/queue/

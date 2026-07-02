@@ -304,9 +304,122 @@ tail -f /home/lighthouse/video-benchmark/data/processed/epic_pipeline_runs/epic1
 
 重新运行队列时，已经同时满足“状态为 `ok`”和“URL 表已有链接”的视频会跳过，不会因为原片已删除而重新下载。
 
-## 4. 把 URL 表交给集群
+## 4. 标准 session 切分
 
-等 `vpn` 端至少完成几个视频后，把 URL 表上传到 COS，生成可下载链接：
+正式 benchmark 构建推荐不要直接把 EPIC 原始视频当作 session，而是在 `540p16` 代理视频基础上切成标准 session。默认建议：
+
+```text
+session 长度：300 秒
+尾段规则：最后不足 60 秒则合并到前一个 session；大于等于 60 秒则保留为短 session
+```
+
+推荐把切分放在集群侧推理前预处理阶段。原因是代理视频已经在 COS，集群可以按需要下载到本地缓存；后续调整 3 分钟或 5 分钟切分时，不需要回到 `vpn` 重新生成并上传 session clip。
+
+集群侧预处理分三步：
+
+1. 下载某个参与者的代理视频 URL 表。
+2. 按固定长度切成本地 session clip，并生成本地 HTTP URL 表。
+3. 用本地 HTTP 服务把 session clip 提供给 vLLM。
+
+以 `P30` 的 5 分钟切分为例：
+
+```bash
+cd /workspace/video-memory-benchmark
+git pull
+
+mkdir -p data/cluster_inputs data/proxy_from_cos outputs/epic_kitchens_100/p30_sessions_300s
+
+curl -L --retry 5 --retry-delay 3 \
+  -o data/cluster_inputs/p30_all_videos_proxy_540p16_urls.csv \
+  '<p30 原始代理视频 URL 表的 signed_url>'
+
+python3 scripts/prepare_video_sessions_for_inference.py \
+  --video-url-csv data/cluster_inputs/p30_all_videos_proxy_540p16_urls.csv \
+  --data-root data \
+  --source-cache-root data/proxy_from_cos \
+  --download-missing-source \
+  --session-duration-sec 300 \
+  --min-tail-sec 60 \
+  --local-url-base http://127.0.0.1:18080
+```
+
+输出：
+
+```text
+data/proxy_from_cos/P30/P30_xx_540p16.mp4
+data/sessions/P30/sessions_300s/*.mp4
+data/cos_urls/p30_all_videos_sessions_300s_urls.csv
+data/processed/epic_pipeline_runs/p30_all_videos_sessions_300s_status.csv
+```
+
+如果想切 3 分钟 session，把参数改成：
+
+```bash
+--session-duration-sec 180
+```
+
+切分脚本默认使用 `ffmpeg -c copy`，速度快且不会重新压缩。session 边界可能受关键帧影响存在小幅偏差；这对 VLM 证据抽取通常可以接受。如果需要更精确的边界，可以改用：
+
+```bash
+--cut-mode reencode
+```
+
+但全量运行会明显增加 CPU 时间。
+
+另开一个 tmux 窗口，在同一台机器上启动本地 HTTP 服务：
+
+```bash
+tmux new -s p30-session-http
+
+cd /workspace/video-memory-benchmark
+
+python3 -m http.server 18080 --bind 0.0.0.0 --directory data/sessions
+```
+
+如果 vLLM 服务和 HTTP 服务在同一台机器或同一个容器里，`http://127.0.0.1:18080` 可以直接使用。如果 vLLM 在另一个容器或节点，`--local-url-base` 要改成 vLLM 进程能访问到的主机地址。
+
+然后运行 session 级 VLM：
+
+```bash
+cd /workspace/video-memory-benchmark
+
+python3 scripts/qwen_video_batch.py \
+  --base-url http://127.0.0.1:8000/v1 \
+  --model qwen35-a3b \
+  --signed-url-csv data/cos_urls/p30_all_videos_sessions_300s_urls.csv \
+  --prompt-file prompts/video_session_evidence_schema_zh.txt \
+  --output-dir outputs/epic_kitchens_100/p30_sessions_300s \
+  --fps 1 \
+  --max-tokens 4096
+```
+
+输出文件会以 `session_id` 命名，例如：
+
+```text
+outputs/epic_kitchens_100/p30_sessions_300s/P30_05_s000.json
+outputs/epic_kitchens_100/p30_sessions_300s/P30_05_s000.clean.json
+outputs/epic_kitchens_100/p30_sessions_300s/batch_status.csv
+```
+
+如果只想重跑某几个 session，用：
+
+```bash
+--record-ids P30_05_s000,P30_05_s001
+```
+
+如果想重跑某个原视频切出来的所有 session，用：
+
+```bash
+--video-ids P30_05
+```
+
+如果需要把切分结果交给另一台机器使用，再考虑把 session clip 上传到 COS；否则推理前本地切分更灵活。
+
+## 5. 把原始视频级 URL 表交给集群
+
+这一节保留给诊断或对照实验。正式证据抽取优先使用第 4 节的 session URL 表。
+
+等 `vpn` 端至少完成几个视频后，把原始视频级 URL 表上传到 COS，生成可下载链接：
 
 ```bash
 ssh vpn
@@ -355,7 +468,7 @@ python3 /home/lighthouse/video-memory-benchmark/scripts/upload_epic_to_cos.py \
   /home/lighthouse/video-benchmark/data/cos_urls/epic100_all_videos_proxy_540p16_urls.csv
 ```
 
-## 5. 集群批量调用 VLM
+## 6. 集群批量调用原始视频级 VLM
 
 集群上先启动 VLM 服务，然后进入试跑包目录：
 
@@ -364,7 +477,7 @@ cd /workspace/qwen_video_probe/qwen_cluster_bundle
 mkdir -p outputs
 ```
 
-下载第 4 步生成的 URL 表：
+下载第 5 步生成的 URL 表：
 
 ```bash
 curl -L -o p04_phase1_proxy_540p16_urls.csv '<第4步 signed_url>'
