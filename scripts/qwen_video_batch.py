@@ -10,8 +10,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-
-from openai import OpenAI
+from typing import Any
 
 
 FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
@@ -81,6 +80,23 @@ def parse_list(value: str | None) -> set[str] | None:
     return items or None
 
 
+def parse_json_object_arg(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    payload = json.loads(value)
+    if not isinstance(payload, dict):
+        raise ValueError("JSON argument must be an object")
+    return payload
+
+
+def build_extra_body(args: argparse.Namespace) -> dict[str, Any]:
+    extra_body = parse_json_object_arg(args.extra_body_json)
+    mm_processor_kwargs = dict(extra_body.get("mm_processor_kwargs") or {})
+    mm_processor_kwargs.update({"fps": args.fps, "do_sample_frames": True})
+    extra_body["mm_processor_kwargs"] = mm_processor_kwargs
+    return extra_body
+
+
 def row_context_text(row: dict[str, str]) -> str:
     keys = [
         "session_id",
@@ -136,7 +152,7 @@ def usage_fields(response: dict) -> dict[str, str]:
     }
 
 
-def call_model(client: OpenAI, args: argparse.Namespace, signed_url: str, prompt: str) -> dict:
+def call_model(client: Any, args: argparse.Namespace, signed_url: str, prompt: str) -> dict:
     response = client.chat.completions.create(
         model=args.model,
         messages=[
@@ -150,7 +166,7 @@ def call_model(client: OpenAI, args: argparse.Namespace, signed_url: str, prompt
         ],
         max_tokens=args.max_tokens,
         temperature=args.temperature,
-        extra_body={"mm_processor_kwargs": {"fps": args.fps, "do_sample_frames": True}},
+        extra_body=build_extra_body(args),
     )
     return response.model_dump()
 
@@ -168,11 +184,17 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--video-ids", help="Comma-separated subset from URL CSV")
     parser.add_argument("--record-ids", help="Comma-separated record ids, usually session_id for session CSVs.")
+    parser.add_argument(
+        "--extra-body-json",
+        help="Extra JSON object merged into the OpenAI-compatible request extra_body.",
+    )
     parser.add_argument("--no-row-context", action="store_true", help="Do not append URL CSV row metadata to the prompt.")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--sleep-seconds", type=float, default=0.0)
     args = parser.parse_args()
+
+    from openai import OpenAI
 
     url_rows = read_rows(Path(args.signed_url_csv))
     wanted_videos = parse_list(args.video_ids)

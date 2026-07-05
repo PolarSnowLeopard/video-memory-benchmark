@@ -236,5 +236,50 @@ python3 scripts/qwen_video_batch.py \
   --overwrite
 ```
 
-window/session 层重跑时使用 `qwen_text_jsonl_batch.py --record-ids ... --overwrite`。
+如果 30 秒片段仍出现 `finish_reason=length` 且错误为 `No JSON object found in assistant content`，优先怀疑模型把输出预算花在长推理或格式漂移上。可以先打印原始响应确认：
 
+```bash
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+out = Path('outputs/epic_kitchens_100/p30_micro_30s')
+for rid in ['P30_02_s001', 'P30_02_s007']:
+    p = out / f'{rid}.json'
+    r = json.loads(p.read_text(encoding='utf-8'))
+    choice = r['choices'][0]
+    msg = choice.get('message') or {}
+    print('\n', rid)
+    print('finish_reason:', choice.get('finish_reason'))
+    print('usage:', r.get('usage'))
+    for key in ['content', 'reasoning']:
+        value = msg.get(key) or ''
+        print(key, 'len=', len(value))
+        print('head:', repr(value[:500]))
+        print('tail:', repr(value[-500:]))
+PY
+```
+
+然后只重跑失败记录。先提高输出上限：
+
+```bash
+python3 scripts/qwen_video_batch.py \
+  --base-url http://127.0.0.1:8000/v1 \
+  --model qwen35-a3b \
+  --signed-url-csv data/cos_urls/p30_all_videos_sessions_30s_urls.csv \
+  --prompt-file prompts/video_micro_evidence_schema_zh.txt \
+  --output-dir outputs/epic_kitchens_100/p30_micro_30s \
+  --record-ids P30_02_s001,P30_02_s007 \
+  --fps 1 \
+  --max-tokens 8192 \
+  --temperature 0 \
+  --overwrite
+```
+
+如果服务端支持 Qwen 的关闭 thinking 参数，可以在重跑时额外加：
+
+```bash
+--extra-body-json '{"chat_template_kwargs":{"enable_thinking":false}}'
+```
+
+window/session 层重跑时使用 `qwen_text_jsonl_batch.py --record-ids ... --overwrite`。

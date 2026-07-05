@@ -7,7 +7,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts.qwen_text_jsonl_batch import extract_json_text, make_prompt_text, record_id_from_record  # noqa: E402
+from scripts.qwen_text_jsonl_batch import (  # noqa: E402
+    extract_json_text,
+    make_prompt_text,
+    parse_json_object_arg,
+    record_id_from_record,
+)
 
 
 class QwenTextJsonlBatchTests(unittest.TestCase):
@@ -26,6 +31,12 @@ class QwenTextJsonlBatchTests(unittest.TestCase):
         text = "```json\n{\"ok\": true, \"value\": \"水槽\"}\n```"
         payload = json.loads(extract_json_text(text))
         self.assertEqual(payload, {"ok": True, "value": "水槽"})
+
+    def test_parse_json_object_arg_rejects_non_objects(self) -> None:
+        self.assertEqual(parse_json_object_arg(None), {})
+        self.assertEqual(parse_json_object_arg('{"chat_template_kwargs":{"enable_thinking":false}}'), {"chat_template_kwargs": {"enable_thinking": False}})
+        with self.assertRaises(ValueError):
+            parse_json_object_arg("[1, 2, 3]")
 
 
 if __name__ == "__main__":

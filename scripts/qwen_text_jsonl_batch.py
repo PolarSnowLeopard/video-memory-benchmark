@@ -66,6 +66,15 @@ def parse_list(value: str | None) -> set[str] | None:
     return items or None
 
 
+def parse_json_object_arg(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    payload = json.loads(value)
+    if not isinstance(payload, dict):
+        raise ValueError("JSON argument must be an object")
+    return payload
+
+
 def record_id_from_record(record: dict[str, Any]) -> str:
     for key in ("record_id", "session_id", "window_id", "source_video_id", "video_id"):
         value = record.get(key)
@@ -114,12 +123,16 @@ def usage_fields(response: dict[str, Any]) -> dict[str, str]:
 
 
 def call_model(client: Any, args: argparse.Namespace, prompt_text: str) -> dict[str, Any]:
-    response = client.chat.completions.create(
-        model=args.model,
-        messages=[{"role": "user", "content": prompt_text}],
-        max_tokens=args.max_tokens,
-        temperature=args.temperature,
-    )
+    kwargs: dict[str, Any] = {
+        "model": args.model,
+        "messages": [{"role": "user", "content": prompt_text}],
+        "max_tokens": args.max_tokens,
+        "temperature": args.temperature,
+    }
+    extra_body = parse_json_object_arg(args.extra_body_json)
+    if extra_body:
+        kwargs["extra_body"] = extra_body
+    response = client.chat.completions.create(**kwargs)
     return response.model_dump()
 
 
@@ -133,6 +146,10 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--max-tokens", type=int, default=8192)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--extra-body-json",
+        help="Extra JSON object passed as OpenAI-compatible request extra_body.",
+    )
     parser.add_argument("--record-ids", help="Comma-separated record ids to run.")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--overwrite", action="store_true")
