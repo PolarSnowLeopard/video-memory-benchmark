@@ -10,8 +10,9 @@
 5. 看不清、无法确认时写入 uncertainties，不要硬猜。
 6. 枚举字段只能从给定集合中选择；不确定时写 "other"。
 7. `object_ids`、`place_id`、`entity_id` 只能引用本 JSON 中已经声明过的 ID。
-8. 时间使用相对本 micro-clip 的 "MM:SS" 或 "MM:SS-MM:SS"。
-9. 控制输出长度，优先保证 JSON 完整可解析。
+8. `clip_time_range.start_sec/end_sec` 只复制输入元信息中的原视频绝对秒数，不要转换。
+9. 除 `clip_time_range` 外，事件、状态和证据时间都使用相对本 micro-clip 的 "MM:SS" 或 "MM:SS-MM:SS"，从 00:00 开始。
+10. 控制输出长度，优先保证 JSON 完整可解析。
 
 数量上限：
 - places 最多 3 个
@@ -28,8 +29,8 @@
   "clip_id": "复制输入元信息中的 session_id；如果没有则 null",
   "source_video_id": "复制输入元信息中的 source_video_id 或 video_id；如果没有则 null",
   "clip_time_range": {
-    "start_sec": "复制输入元信息中的 start_sec；如果没有则 null",
-    "end_sec": "复制输入元信息中的 end_sec；如果没有则 null"
+    "start_sec": "复制输入元信息中的 start_sec 原始秒数；如果没有则 null",
+    "end_sec": "复制输入元信息中的 end_sec 原始秒数；如果没有则 null"
   },
   "clip_summary": "一句话概括本 30 秒内可见的主要动作和关键状态变化",
   "places": [

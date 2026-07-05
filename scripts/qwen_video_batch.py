@@ -114,7 +114,11 @@ def row_context_text(row: dict[str, str]) -> str:
     return (
         "\n\n本次输入元信息：\n"
         + "\n".join(f"- {item}" for item in items)
-        + "\n请在输出 JSON 中复制 session_id/source_video_id（如果存在），时间默认写相对本 session 的 MM:SS。"
+        + (
+            "\n请在输出 JSON 中复制 session_id/source_video_id（如果存在）。"
+            "如果提示词要求复制 start_sec/end_sec，就直接复制输入元信息中的原始秒数；"
+            "其他事件、状态和证据时间默认写相对当前输入视频片段的 MM:SS。"
+        )
     )
 
 
