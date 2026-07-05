@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Batch-call an OpenAI-compatible VLM endpoint for COS-hosted videos."""
+"""Batch-call an OpenAI-compatible chat endpoint for JSONL text aggregation."""
 
 from __future__ import annotations
 
@@ -10,8 +10,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-
-from openai import OpenAI
+from typing import Any
 
 
 FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
@@ -21,9 +20,6 @@ STATUS_FIELDS = [
     "status",
     "error",
     "record_id",
-    "session_id",
-    "video_id",
-    "source_video_id",
     "raw_output",
     "clean_output",
     "finish_reason",
@@ -33,7 +29,17 @@ STATUS_FIELDS = [
 ]
 
 
-def read_rows(path: Path) -> list[dict[str, str]]:
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return records
+
+
+def read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
@@ -47,31 +53,10 @@ def write_csv(path: Path, rows: list[dict[str, str]], fieldnames: list[str]) -> 
 
 
 def upsert_csv(path: Path, row: dict[str, str], fieldnames: list[str], key_field: str) -> None:
-    rows = read_rows(path) if path.exists() else []
-    rows = [r for r in rows if r.get(key_field) != row.get(key_field)]
-    rows.append({k: row.get(k, "") for k in fieldnames})
+    rows = read_csv(path) if path.exists() else []
+    rows = [existing for existing in rows if existing.get(key_field) != row.get(key_field)]
+    rows.append({key: row.get(key, "") for key in fieldnames})
     write_csv(path, rows, fieldnames)
-
-
-def video_id_from_row(row: dict[str, str]) -> str:
-    if row.get("video_id"):
-        return row["video_id"]
-    if row.get("source_video_id"):
-        return row["source_video_id"]
-    key = row.get("key") or row.get("local_path") or ""
-    stem = Path(key).stem
-    for suffix in ("_540p16", "_540p", "_proxy"):
-        if stem.endswith(suffix):
-            stem = stem[: -len(suffix)]
-    return stem
-
-
-def record_id_from_row(row: dict[str, str]) -> str:
-    return row.get("session_id") or row.get("record_id") or video_id_from_row(row)
-
-
-def source_video_id_from_row(row: dict[str, str]) -> str:
-    return row.get("source_video_id") or row.get("video_id") or video_id_from_row(row)
 
 
 def parse_list(value: str | None) -> set[str] | None:
@@ -81,25 +66,17 @@ def parse_list(value: str | None) -> set[str] | None:
     return items or None
 
 
-def row_context_text(row: dict[str, str]) -> str:
-    keys = [
-        "session_id",
-        "source_video_id",
-        "video_id",
-        "participant_id",
-        "session_index",
-        "start_sec",
-        "end_sec",
-        "duration_sec",
-    ]
-    items = [f"{key}={row[key]}" for key in keys if row.get(key)]
-    if not items:
-        return ""
-    return (
-        "\n\n本次输入元信息：\n"
-        + "\n".join(f"- {item}" for item in items)
-        + "\n请在输出 JSON 中复制 session_id/source_video_id（如果存在），时间默认写相对本 session 的 MM:SS。"
-    )
+def record_id_from_record(record: dict[str, Any]) -> str:
+    for key in ("record_id", "session_id", "window_id", "source_video_id", "video_id"):
+        value = record.get(key)
+        if value:
+            return str(value)
+    raise ValueError(f"Input record has no usable id: {record}")
+
+
+def make_prompt_text(prompt: str, record: dict[str, Any]) -> str:
+    payload = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+    return f"{prompt.rstrip()}\n\n输入 JSON：\n{payload}"
 
 
 def extract_json_text(text: str) -> str:
@@ -127,7 +104,7 @@ def clean_response(raw_path: Path, clean_path: Path) -> None:
     clean_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def usage_fields(response: dict) -> dict[str, str]:
+def usage_fields(response: dict[str, Any]) -> dict[str, str]:
     usage = response.get("usage") or {}
     return {
         "prompt_tokens": str(usage.get("prompt_tokens", "")),
@@ -136,61 +113,42 @@ def usage_fields(response: dict) -> dict[str, str]:
     }
 
 
-def call_model(client: OpenAI, args: argparse.Namespace, signed_url: str, prompt: str) -> dict:
+def call_model(client: Any, args: argparse.Namespace, prompt_text: str) -> dict[str, Any]:
     response = client.chat.completions.create(
         model=args.model,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "video_url", "video_url": {"url": signed_url}},
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ],
+        messages=[{"role": "user", "content": prompt_text}],
         max_tokens=args.max_tokens,
         temperature=args.temperature,
-        extra_body={"mm_processor_kwargs": {"fps": args.fps, "do_sample_frames": True}},
     )
     return response.model_dump()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--signed-url-csv", required=True)
+    parser.add_argument("--input-jsonl", required=True)
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--api-key", default="EMPTY")
     parser.add_argument("--model", required=True)
-    parser.add_argument("--prompt-file", default="video_event_schema_zh.txt")
-    parser.add_argument("--output-dir", default="outputs")
-    parser.add_argument("--fps", type=float, default=1.0)
+    parser.add_argument("--prompt-file", required=True)
+    parser.add_argument("--output-dir", required=True)
     parser.add_argument("--max-tokens", type=int, default=8192)
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--video-ids", help="Comma-separated subset from URL CSV")
-    parser.add_argument("--record-ids", help="Comma-separated record ids, usually session_id for session CSVs.")
-    parser.add_argument("--no-row-context", action="store_true", help="Do not append URL CSV row metadata to the prompt.")
+    parser.add_argument("--record-ids", help="Comma-separated record ids to run.")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--sleep-seconds", type=float, default=0.0)
     args = parser.parse_args()
 
-    url_rows = read_rows(Path(args.signed_url_csv))
-    wanted_videos = parse_list(args.video_ids)
+    from openai import OpenAI
+
+    records = read_jsonl(Path(args.input_jsonl))
     wanted_records = parse_list(args.record_ids)
-    selected: list[dict[str, str]] = []
-    for row in url_rows:
-        video_id = video_id_from_row(row)
-        source_video_id = source_video_id_from_row(row)
-        record_id = record_id_from_row(row)
+    selected: list[dict[str, Any]] = []
+    for record in records:
+        record_id = record_id_from_record(record)
         if wanted_records is not None and record_id not in wanted_records:
             continue
-        if wanted_videos is not None and video_id not in wanted_videos and source_video_id not in wanted_videos:
-            continue
-        row["_record_id"] = record_id
-        row["_video_id"] = video_id
-        row["_source_video_id"] = source_video_id
-        row["_session_id"] = row.get("session_id", "")
-        selected.append(row)
+        selected.append(record)
     if args.limit is not None:
         selected = selected[: args.limit]
 
@@ -199,12 +157,9 @@ def main() -> None:
     status_csv = output_dir / "batch_status.csv"
     client = OpenAI(api_key=args.api_key, base_url=args.base_url, timeout=3600)
 
-    print(f"Selected videos: {len(selected)}", flush=True)
-    for idx, row in enumerate(selected, start=1):
-        record_id = row["_record_id"]
-        video_id = row["_video_id"]
-        source_video_id = row["_source_video_id"]
-        session_id = row["_session_id"]
+    print(f"Selected records: {len(selected)}", flush=True)
+    for idx, record in enumerate(selected, start=1):
+        record_id = record_id_from_record(record)
         raw_path = output_dir / f"{record_id}.json"
         clean_path = output_dir / f"{record_id}.clean.json"
         print(f"\n[{idx}/{len(selected)}] {record_id}", flush=True)
@@ -215,9 +170,6 @@ def main() -> None:
                 "status": "skipped",
                 "error": "",
                 "record_id": record_id,
-                "session_id": session_id,
-                "video_id": video_id,
-                "source_video_id": source_video_id,
                 "raw_output": str(raw_path),
                 "clean_output": str(clean_path),
                 "finish_reason": "",
@@ -228,8 +180,8 @@ def main() -> None:
             continue
 
         try:
-            row_prompt = prompt if args.no_row_context else prompt + row_context_text(row)
-            response = call_model(client, args, row["signed_url"], row_prompt)
+            prompt_text = make_prompt_text(prompt, record)
+            response = call_model(client, args, prompt_text)
             raw_path.parent.mkdir(parents=True, exist_ok=True)
             raw_path.write_text(json.dumps(response, ensure_ascii=False, indent=2), encoding="utf-8")
             finish_reason = str((response.get("choices") or [{}])[0].get("finish_reason", ""))
@@ -245,9 +197,6 @@ def main() -> None:
                 "status": status_value,
                 "error": clean_error,
                 "record_id": record_id,
-                "session_id": session_id,
-                "video_id": video_id,
-                "source_video_id": source_video_id,
                 "raw_output": str(raw_path),
                 "clean_output": str(clean_path if clean_path.exists() else ""),
                 "finish_reason": finish_reason,
@@ -259,15 +208,12 @@ def main() -> None:
                 "status": "error",
                 "error": repr(exc),
                 "record_id": record_id,
-                "session_id": session_id,
-                "video_id": video_id,
-                "source_video_id": source_video_id,
                 "raw_output": str(raw_path),
                 "clean_output": "",
                 "finish_reason": "",
                 **usage_fields({}),
             }
-            print(f"ERROR {video_id}: {exc!r}", flush=True)
+            print(f"ERROR {record_id}: {exc!r}", flush=True)
         upsert_csv(status_csv, status, STATUS_FIELDS, "record_id")
         if args.sleep_seconds:
             time.sleep(args.sleep_seconds)

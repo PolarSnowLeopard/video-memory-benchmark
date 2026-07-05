@@ -1,0 +1,107 @@
+你将收到同一原始视频中一个局部时间窗口的多个 30 秒 micro-clip JSON。请聚合这些短时证据，输出严格 JSON，不要输出 Markdown，不要输出额外解释。
+
+该输出是隐藏参考标注的一部分，只用于 benchmark 数据构建、证据追溯和人工审核；被评测 agent 不会看到它。
+
+硬性规则：
+1. 所有自然语言字段必须使用中文。
+2. 只能根据输入 JSON 聚合，不要补充外部常识，不要凭空添加视频中没有的事实。
+3. 不能写“通常、习惯、经常、总是、always、usually、typically”等长期结论。
+4. 枚举字段只能从给定集合中选择；不确定时写 "other"。
+5. 每个聚合结论必须保留 supporting_clip_ids。
+6. 如果 micro-clip 之间存在冲突，不要强行合并，写入 conflicts_or_uncertainties。
+7. 输出必须是一个可被 json.loads 解析的 JSON 对象。
+
+输出 JSON 结构如下，字段名必须保持一致：
+
+{
+  "window_id": "复制输入 JSON 中的 window_id 或 record_id",
+  "source_video_id": "复制输入 JSON 中的 source_video_id",
+  "time_range": {
+    "start_sec": "复制输入 JSON 中的 start_sec",
+    "end_sec": "复制输入 JSON 中的 end_sec"
+  },
+  "window_summary": "一句话概括该局部窗口内的任务链、主要物体和关键状态变化",
+  "entity_map": [
+    {
+      "entity_id": "ent_1",
+      "name": "合并后的实体名称",
+      "entity_type": "place|object|food|tool|appliance|container|other",
+      "source_ids": ["micro-clip 中原始 place_id/object_id，格式建议 clip_id:local_id"],
+      "distinctive_attributes": ["可用于后续跨窗口追踪的属性"],
+      "supporting_clip_ids": ["clip_id"],
+      "confidence": "high|medium|low"
+    }
+  ],
+  "local_event_chain": [
+    {
+      "event_id": "wevent_1",
+      "time_range": "相对原始视频的秒范围，例如 30-58",
+      "action_type": "move|pick_up|put_down|open|close|clean|cut|mix|cook|pour|wash|cover|uncover|search|inspect|store|retrieve|discard|other",
+      "action": "聚合后的可见动作",
+      "entity_ids": ["ent_1"],
+      "pre_state": "动作前状态；无法判断则 null",
+      "post_state": "动作后状态；无法判断则 null",
+      "supporting_clip_ids": ["clip_id"],
+      "confidence": "high|medium|low"
+    }
+  ],
+  "state_changes": [
+    {
+      "change_id": "wchange_1",
+      "time_range": "相对原始视频的秒范围，例如 30-58",
+      "entity_id": "ent_1",
+      "attribute": "location|container|open_closed|on_off|cleanliness|fullness|quantity|covered|task_progress|other",
+      "before": "窗口内变化前状态；如果开始前不可见，写 unknown",
+      "after": "窗口内变化后状态",
+      "supporting_event_ids": ["wevent_1"],
+      "supporting_clip_ids": ["clip_id"],
+      "confidence": "high|medium|low"
+    }
+  ],
+  "window_end_state": [
+    {
+      "entity_id": "ent_1",
+      "attribute": "location|container|open_closed|on_off|cleanliness|fullness|quantity|covered|task_progress|other",
+      "value": "该窗口结束时的状态",
+      "supporting_clip_ids": ["clip_id"],
+      "confidence": "high|medium|low"
+    }
+  ],
+  "open_threads": [
+    {
+      "thread_id": "thread_1",
+      "description": "窗口结束时仍未闭合、值得后续窗口继续追踪的任务或状态",
+      "entity_ids": ["ent_1"],
+      "supporting_clip_ids": ["clip_id"],
+      "confidence": "high|medium|low"
+    }
+  ],
+  "evidence_facts": [
+    {
+      "fact_id": "fact_1",
+      "claim": "只写该窗口内可支持的观察事实，不写长期结论",
+      "entity_ids": ["ent_1"],
+      "fact_type": "layout|object_location|object_state|state_change|procedure_step|open_thread|other",
+      "supporting_clip_ids": ["clip_id"],
+      "why_useful_for_memory": "它为何可能用于之后构建跨会话记忆问题",
+      "confidence": "high|medium|low"
+    }
+  ],
+  "conflicts_or_uncertainties": [
+    {
+      "item": "冲突或不确定的实体、动作、状态",
+      "description": "冲突或不确定原因",
+      "affected_fact_ids": ["fact_1"],
+      "supporting_clip_ids": ["clip_id"]
+    }
+  ]
+}
+
+数量上限：
+- entity_map 最多 10 个
+- local_event_chain 最多 8 个
+- state_changes 最多 6 个
+- window_end_state 最多 8 个
+- open_threads 最多 4 个
+- evidence_facts 最多 8 个
+- conflicts_or_uncertainties 最多 5 个
