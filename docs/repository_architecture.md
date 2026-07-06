@@ -8,6 +8,14 @@
 
 当前完成的是第一部分中的 EPIC-KITCHENS-100 数据处理子流程。
 
+当前数据构建主线是隐藏参考证据的分层抽取：
+
+```text
+30 秒 micro-clip -> 120 秒 local window -> 完整 source/session
+```
+
+这套中间证据只用于 benchmark 标注、问题生成和人工审核，不作为被评测 agent 的输入。
+
 ## 设计原则
 
 ### Manifest 驱动
@@ -90,11 +98,15 @@ data/
 
 docs/
   epic_standard_pipeline.md
+  hierarchical_evidence_pipeline.md
   qwen_vl_video_pipeline.md
   repository_architecture.md
 
 prompts/
   video_event_schema_zh.txt
+  video_micro_evidence_schema_zh.txt
+  video_window_aggregation_schema_zh.txt
+  video_session_aggregation_schema_zh.txt
 
 reports/
   epic_kitchens_100/
@@ -103,7 +115,12 @@ scripts/
   analyze_epic_kitchens_100.py
   build_epic_batch_manifest.py
   run_epic_vpn_batch.py
+  run_epic_vpn_participant_queue.py
+  prepare_video_sessions_for_inference.py
   qwen_video_batch.py
+  qwen_text_jsonl_batch.py
+  build_hierarchical_evidence_inputs.py
+  build_hierarchical_example_viewer.py
   qwen_video_probe.py
   extract_qwen_json.py
   upload_epic_to_cos.py
@@ -194,39 +211,42 @@ python scripts/run_epic_vpn_batch.py \
   --cos-prefix video-benchmark/epic-kitchens
 ```
 
-### 阶段 3：VLM 中间特征抽取
+### 阶段 3：分层 VLM/LLM 中间特征抽取
 
 输入：
 
 - COS URL 表；
-- `prompts/video_event_schema_zh.txt`
+- `prompts/video_micro_evidence_schema_zh.txt`
+- `prompts/video_window_aggregation_schema_zh.txt`
+- `prompts/video_session_aggregation_schema_zh.txt`
 
 输出：
 
-- 原始 VLM 响应；
-- clean JSON；
+- 30 秒 micro-clip 原始响应和 clean JSON；
+- 120 秒 window 聚合原始响应和 clean JSON；
+- 完整 source/session 聚合原始响应和 clean JSON；
 - batch status。
 
 脚本：
 
 ```bash
-python scripts/qwen_video_batch.py \
-  --base-url http://127.0.0.1:8000/v1 \
-  --model qwen35-a3b \
-  --signed-url-csv p04_phase1_proxy_540p16_urls.csv \
-  --prompt-file prompts/video_event_schema_zh.txt \
-  --output-dir outputs/p04_phase1 \
-  --fps 1 \
-  --max-tokens 8192
+python scripts/prepare_video_sessions_for_inference.py ...
+python scripts/qwen_video_batch.py ...
+python scripts/build_hierarchical_evidence_inputs.py windows ...
+python scripts/qwen_text_jsonl_batch.py ...
+python scripts/build_hierarchical_evidence_inputs.py sessions ...
+python scripts/qwen_text_jsonl_batch.py ...
 ```
+
+完整命令见 `docs/hierarchical_evidence_pipeline.md`。
 
 ### 阶段 4：Benchmark 构建
 
-还未实现，建议下一步定义：
+还未实现。下一步建议先把分层 JSON 变成可审核的参考证据图，再定义：
 
-- 单视频状态图增量 schema；
-- `memory_candidate` schema；
-- `cross_session_memory` schema；
+- validator/normalizer；
+- 跨 session 实体对齐 schema；
+- `memory_candidate` 和 `cross_session_memory` schema；
 - `benchmark_question` schema；
 - 证据链格式；
 - 评分规则。

@@ -2,6 +2,14 @@
 
 目标：尽快持续产出 VLM 初步结构化 JSON，而不是等完整数据全部下载完。流水线按 manifest 逐个视频处理，任何一步失败都写状态表，重新运行会跳过已完成结果。
 
+当前正式证据构建推荐使用分层流程：
+
+```text
+540p16 代理视频 -> 30 秒 micro-clip -> 120 秒 window -> 完整 source/session
+```
+
+完整命令见 [hierarchical_evidence_pipeline.md](hierarchical_evidence_pipeline.md)。本文档仍保留 5 分钟直接切分和原始视频级调用，主要用于历史试跑、诊断和对照实验。
+
 ## 目录约定
 
 本地仓库：
@@ -306,7 +314,9 @@ tail -f /home/lighthouse/video-benchmark/data/processed/epic_pipeline_runs/epic1
 
 ## 4. 标准 session 切分
 
-正式 benchmark 构建推荐不要直接把 EPIC 原始视频当作 session，而是在 `540p16` 代理视频基础上切成标准 session。默认建议：
+这一节是早期 5 分钟直读流程，保留给对照实验和诊断。当前正式证据构建优先使用 [hierarchical_evidence_pipeline.md](hierarchical_evidence_pipeline.md) 中的 30 秒 micro-clip 分层流程。
+
+如果仍要运行 5 分钟直读流程，不要直接把 EPIC 原始视频当作 session，而是在 `540p16` 代理视频基础上切成标准 session。默认参数：
 
 ```text
 session 长度：300 秒

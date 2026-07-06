@@ -68,6 +68,7 @@ python3 scripts/qwen_video_batch.py \
   --fps 1 \
   --max-tokens 4096 \
   --temperature 0 \
+  --extra-body-json '{"chat_template_kwargs":{"enable_thinking":false}}' \
   --limit 12
 ```
 
@@ -98,7 +99,8 @@ python3 scripts/qwen_video_batch.py \
   --output-dir outputs/epic_kitchens_100/p30_micro_30s \
   --fps 1 \
   --max-tokens 4096 \
-  --temperature 0
+  --temperature 0 \
+  --extra-body-json '{"chat_template_kwargs":{"enable_thinking":false}}'
 ```
 
 P30 预计约 600 个 30 秒 micro-clip。
@@ -135,6 +137,7 @@ python3 scripts/qwen_text_jsonl_batch.py \
   --output-dir outputs/epic_kitchens_100/p30_windows_120s \
   --max-tokens 8192 \
   --temperature 0 \
+  --extra-body-json '{"chat_template_kwargs":{"enable_thinking":false}}' \
   --limit 5
 ```
 
@@ -148,7 +151,8 @@ python3 scripts/qwen_text_jsonl_batch.py \
   --prompt-file prompts/video_window_aggregation_schema_zh.txt \
   --output-dir outputs/epic_kitchens_100/p30_windows_120s \
   --max-tokens 8192 \
-  --temperature 0
+  --temperature 0 \
+  --extra-body-json '{"chat_template_kwargs":{"enable_thinking":false}}'
 ```
 
 ## 5. 构建完整 session 输入
@@ -172,7 +176,24 @@ python3 scripts/qwen_text_jsonl_batch.py \
   --prompt-file prompts/video_session_aggregation_schema_zh.txt \
   --output-dir outputs/epic_kitchens_100/p30_sessions_full \
   --max-tokens 12288 \
-  --temperature 0
+  --temperature 0 \
+  --extra-body-json '{"chat_template_kwargs":{"enable_thinking":false}}'
+```
+
+长 session 可能触发 `finish_reason=length`。P30 试跑中 `P30_107` 的 session 聚合需要把输出上限提高到 `16384` 后重跑：
+
+```bash
+python3 scripts/qwen_text_jsonl_batch.py \
+  --base-url http://127.0.0.1:8000/v1 \
+  --model qwen35-a3b \
+  --input-jsonl outputs/epic_kitchens_100/p30_hierarchical/session_inputs_30s_120s.jsonl \
+  --prompt-file prompts/video_session_aggregation_schema_zh.txt \
+  --output-dir outputs/epic_kitchens_100/p30_sessions_full \
+  --record-ids P30_107 \
+  --max-tokens 16384 \
+  --temperature 0 \
+  --extra-body-json '{"chat_template_kwargs":{"enable_thinking":false}}' \
+  --overwrite
 ```
 
 ## 7. 结果目录
@@ -198,7 +219,50 @@ outputs/epic_kitchens_100/p30_sessions_full/
   batch_status.csv
 ```
 
-## 8. 失败重跑
+P30 完整试跑的规模：
+
+```text
+30 秒 micro-clip：594 条
+120 秒 window：156 条
+完整 source/session：25 条
+```
+
+实际状态中可能出现 `skipped`，通常表示对应 clean JSON 已存在、脚本跳过重算，不等于失败。
+
+## 8. 结果检查
+
+统计三层状态：
+
+```bash
+python3 - <<'PY'
+import csv
+from collections import Counter
+
+for p in [
+    'outputs/epic_kitchens_100/p30_micro_30s/batch_status.csv',
+    'outputs/epic_kitchens_100/p30_windows_120s/batch_status.csv',
+    'outputs/epic_kitchens_100/p30_sessions_full/batch_status.csv',
+]:
+    rows=list(csv.DictReader(open(p, newline='', encoding='utf-8')))
+    print('\n', p)
+    print('rows:', len(rows))
+    print('status:', Counter(r['status'] for r in rows))
+    print('finish_reason:', Counter(r.get('finish_reason', '') for r in rows))
+    for r in rows:
+        if r['status'] not in {'ok', 'skipped'}:
+            print(r['record_id'], r['status'], r.get('finish_reason'), r.get('error'))
+PY
+```
+
+检查 clean JSON 数量：
+
+```bash
+find outputs/epic_kitchens_100/p30_micro_30s -name '*.clean.json' | wc -l
+find outputs/epic_kitchens_100/p30_windows_120s -name '*.clean.json' | wc -l
+find outputs/epic_kitchens_100/p30_sessions_full -name '*.clean.json' | wc -l
+```
+
+## 9. 失败重跑
 
 查看失败项：
 
@@ -283,3 +347,79 @@ python3 scripts/qwen_video_batch.py \
 ```
 
 window/session 层重跑时使用 `qwen_text_jsonl_batch.py --record-ids ... --overwrite`。
+
+## 10. 打包结果带回本地
+
+在集群上打包：
+
+```bash
+tar -czf /tmp/p30_hierarchical_outputs.tar.gz \
+  outputs/epic_kitchens_100/p30_micro_30s \
+  outputs/epic_kitchens_100/p30_windows_120s \
+  outputs/epic_kitchens_100/p30_sessions_full \
+  outputs/epic_kitchens_100/p30_hierarchical \
+  data/cos_urls/p30_all_videos_sessions_30s_urls.csv \
+  data/processed/epic_pipeline_runs/p30_all_videos_sessions_30s_status.csv
+```
+
+如果集群不能直接 `scp` 到本地，可以上传到 COS，再在本地下载并解压到：
+
+```text
+data/tmp/cluster_outputs/p30_hierarchical/extracted/
+```
+
+本地目录应包含：
+
+```text
+data/tmp/cluster_outputs/p30_hierarchical/extracted/outputs/epic_kitchens_100/p30_micro_30s/
+data/tmp/cluster_outputs/p30_hierarchical/extracted/outputs/epic_kitchens_100/p30_windows_120s/
+data/tmp/cluster_outputs/p30_hierarchical/extracted/outputs/epic_kitchens_100/p30_sessions_full/
+data/tmp/cluster_outputs/p30_hierarchical/extracted/outputs/epic_kitchens_100/p30_hierarchical/
+```
+
+## 11. 生成 HTML 查看器
+
+HTML 查看器用于单个视频的人工浏览：左侧播放代理视频，右侧展示完整 session、window 和 micro-clip JSON。
+
+前提：
+
+- 本地已经有集群打包解压后的分层输出；
+- 本地有该参与者代理视频的 COS URL 表，例如：
+
+```text
+data/tmp/cluster_outputs/p30_all/data/cluster_inputs/p30_all_videos_proxy_540p16_urls.csv
+```
+
+生成 P30_03 示例：
+
+```bash
+PY=/Users/zhaofanyu/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3
+
+$PY scripts/build_hierarchical_example_viewer.py \
+  --video-id P30_03 \
+  --extracted-root data/tmp/cluster_outputs/p30_hierarchical/extracted \
+  --proxy-url-csv data/tmp/cluster_outputs/p30_all/data/cluster_inputs/p30_all_videos_proxy_540p16_urls.csv \
+  --output data/tmp/viewers/p30_03_hierarchical_viewer.html
+```
+
+本地可以直接打开 HTML；如果浏览器对 `file://` 下的远程视频播放有限制，用本地 HTTP 服务打开：
+
+```bash
+cd data/tmp/viewers
+$PY -m http.server 8899
+```
+
+然后访问：
+
+```text
+http://127.0.0.1:8899/p30_03_hierarchical_viewer.html
+```
+
+当前示例也同步到了 `vpn` 的报告服务：
+
+```text
+远端路径：/home/lighthouse/video-memory-benchmark/reports/epic_kitchens_100/p30_03_hierarchical_viewer.html
+线上地址：http://yufanwenshu.cn:8000/epic_kitchens_100/p30_03_hierarchical_viewer.html
+```
+
+该 HTML 内嵌 COS 签名视频 URL。不要提交到 GitHub；分享给他人前确认签名未过期、网络可访问，并遵守 EPIC-KITCHENS 数据许可。

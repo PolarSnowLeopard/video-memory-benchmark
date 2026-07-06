@@ -1,5 +1,13 @@
 # Qwen 视频输入试跑流程
 
+本文档记录早期“视频 URL 输入链路”试跑。当前 benchmark 数据构建主线已经迁移到分层证据抽取：
+
+```text
+30 秒 micro-clip 视频抽取 -> 120 秒 window 文本聚合 -> 完整 source/session 文本聚合
+```
+
+正式运行命令见 [hierarchical_evidence_pipeline.md](hierarchical_evidence_pipeline.md)。本文档仍用于说明模型服务、`video_url` 请求格式和单视频调试。
+
 ## 当前可用视频
 
 腾讯云 COS 中已有 P04 的三类文件：
@@ -188,4 +196,9 @@ python scripts/qwen_video_probe.py \
 
 详细提示词在 `prompts/video_event_schema_zh.txt`。由于状态图字段比旧版事件表更长，批量调用建议从 `--max-tokens 8192` 起步；如果 `batch_status.csv` 中出现 `finish_reason=length`，对对应视频用 `--max-tokens 12288 --overwrite` 重跑。
 
-等单视频状态图增量稳定后，再由第二步脚本做同一参与者内的实体对齐、状态覆盖、跨会话问题生成和证据链构造。
+当前不再建议直接把完整原始视频作为主要证据抽取单位。更稳的做法是：
+
+1. 用 `prompts/video_micro_evidence_schema_zh.txt` 对 30 秒片段抽取局部事实。
+2. 用 `prompts/video_window_aggregation_schema_zh.txt` 聚合 120 秒窗口。
+3. 用 `prompts/video_session_aggregation_schema_zh.txt` 聚合完整 source/session。
+4. 后续再做跨 session 实体对齐、状态覆盖、问题生成和证据链构造。
