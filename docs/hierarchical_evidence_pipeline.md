@@ -423,3 +423,13 @@ http://127.0.0.1:8899/p30_03_hierarchical_viewer.html
 ```
 
 该 HTML 内嵌 COS 签名视频 URL。不要提交到 GitHub；分享给他人前确认签名未过期、网络可访问，并遵守 EPIC-KITCHENS 数据许可。
+
+## 12. 进入质检与参考证据放行
+
+三层抽取输出不是 benchmark 最终标注，不能直接用于问题和标准答案。下一步必须执行确定性校验、百炼视觉复核、争议片段复核和人工抽检。
+
+完整命令见：
+
+```text
+docs/hierarchical_evidence_qc_pipeline.md
+```

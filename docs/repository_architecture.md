@@ -12,6 +12,7 @@
 
 ```text
 30 秒 micro-clip -> 120 秒 local window -> 完整 source/session
+-> 结构校验 -> 独立视觉复核 -> 人工抽检 -> reference-ready 证据
 ```
 
 这套中间证据只用于 benchmark 标注、问题生成和人工审核，不作为被评测 agent 的输入。
@@ -99,6 +100,7 @@ data/
 docs/
   epic_standard_pipeline.md
   hierarchical_evidence_pipeline.md
+  hierarchical_evidence_qc_pipeline.md
   qwen_vl_video_pipeline.md
   repository_architecture.md
 
@@ -107,6 +109,8 @@ prompts/
   video_micro_evidence_schema_zh.txt
   video_window_aggregation_schema_zh.txt
   video_session_aggregation_schema_zh.txt
+  video_candidate_verification_schema_zh.txt
+  video_candidate_local_verification_schema_zh.txt
 
 reports/
   epic_kitchens_100/
@@ -121,6 +125,12 @@ scripts/
   qwen_text_jsonl_batch.py
   build_hierarchical_evidence_inputs.py
   build_hierarchical_example_viewer.py
+  validate_hierarchical_evidence.py
+  build_bailian_qc_batch.py
+  bailian_batch_job.py
+  merge_bailian_qc_results.py
+  prepare_qc_review_clips.py
+  finalize_reference_evidence.py
   qwen_video_probe.py
   extract_qwen_json.py
   upload_epic_to_cos.py
@@ -240,11 +250,27 @@ python scripts/qwen_text_jsonl_batch.py ...
 
 完整命令见 `docs/hierarchical_evidence_pipeline.md`。
 
-### 阶段 4：Benchmark 构建
+### 阶段 4：参考证据质检与放行
+
+输入：
+
+- 三层 clean JSON；
+- source/session 输入 JSONL；
+- 完整代理视频 COS URL 表。
+
+输出：
+
+- 三层结构校验报告；
+- 百炼完整视频和局部视频复核结果；
+- 人工审核表；
+- `reference_ready.jsonl`、`rejected.jsonl` 和 `unresolved.jsonl`。
+
+完整命令见 `docs/hierarchical_evidence_qc_pipeline.md`。
+
+### 阶段 5：Benchmark 问题与评分构建
 
 还未实现。下一步建议先把分层 JSON 变成可审核的参考证据图，再定义：
 
-- validator/normalizer；
 - 跨 session 实体对齐 schema；
 - `memory_candidate` 和 `cross_session_memory` schema；
 - `benchmark_question` schema；
