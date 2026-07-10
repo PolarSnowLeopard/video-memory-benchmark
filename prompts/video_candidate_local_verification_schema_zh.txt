@@ -1,0 +1,34 @@
+你将收到一条待核验候选事实，以及从完整第一人称厨房视频中切出的一个或多个连续局部片段。你的任务只判断这些局部片段是否支持该候选事实，不要重新总结视频。
+
+硬性规则：
+1. 只依据输入局部视频的视觉画面判断，不使用外部常识。
+2. 输入 clip_ranges 给出每个局部片段在原始视频中的绝对起止秒数。输出 evidence_time_ranges 必须换算成原始视频绝对秒数。
+3. 只能输出输入的 candidate_id，且恰好输出一个结果。
+4. verdict 只能是 entailed、contradicted、insufficient：
+   - entailed：局部画面清楚且直接支持原候选核心事实；
+   - contradicted：局部画面清楚显示与原候选不相容的事实；
+   - insufficient：关键画面仍然不可见、遮挡、物体身份不清、位置类型不清或无法可靠判断。
+5. 不能因为物体接近某处就断言被放入该容器；无法确认抽屉、橱柜、冰箱等具体类型时选择 insufficient。
+6. corrected_claim 只在画面明确支持更保守描述时填写，否则写 null；它不会被自动采纳。
+7. 所有自然语言字段使用中文。
+8. 只输出一个可被 json.loads 解析的 JSON 对象，不输出 Markdown 或额外解释。
+
+输出结构：
+{
+  "source_video_id": "复制输入 source_video_id",
+  "verification_results": [
+    {
+      "candidate_id": "复制输入 candidate_id",
+      "verdict": "entailed|contradicted|insufficient",
+      "corrected_claim": "更保守的直接观察描述，或 null",
+      "evidence_time_ranges": [
+        {"start_sec": 30.0, "end_sec": 40.0}
+      ],
+      "reason_codes": [
+        "visible_support|visual_contradiction|time_range_not_visible|object_identity_unclear|location_unclear|state_unclear|action_unclear|video_sampling_insufficient|other"
+      ],
+      "reason": "简短说明局部画面依据",
+      "confidence": "high|medium|low"
+    }
+  ]
+}

@@ -28,11 +28,13 @@ HUMAN_REVIEW_FIELDS = [
     "claim",
     "qc_status",
     "first_pass_verdict",
+    "local_verdict",
     "quality_flags",
     "support_ranges",
     "corrected_claim",
     "reason",
     "human_decision",
+    "approved_claim",
     "human_notes",
 ]
 
@@ -229,6 +231,64 @@ def merge_source_verdicts(
     )
 
 
+def merge_local_verdict(
+    first_pass_record: dict[str, Any],
+    manifest: dict[str, Any],
+    response: dict[str, Any],
+) -> dict[str, Any]:
+    merged = copy.deepcopy(first_pass_record)
+    source_video_id = str(merged.get("source_video_id") or "")
+    candidate_id = str(manifest.get("candidate_id") or "")
+    if not source_video_id or not candidate_id:
+        raise ValueError("Local manifest requires source_video_id and candidate_id")
+    if str(manifest.get("source_video_id") or "") != source_video_id:
+        raise ValueError("Local manifest source_video_id mismatch")
+    if str(response.get("source_video_id") or "") != source_video_id:
+        raise ValueError("Local verifier response source_video_id mismatch")
+    candidates = id_map(list(merged.get("candidates") or []), "candidate_id", "QC candidate")
+    if candidate_id not in candidates:
+        raise ValueError(f"Local manifest candidate is missing from first pass: {candidate_id}")
+    verifications = id_map(
+        list(response.get("verification_results") or []),
+        "candidate_id",
+        "local verification result",
+    )
+    if set(verifications) != {candidate_id}:
+        raise ValueError(
+            f"Local verification coverage mismatch: expected={candidate_id} "
+            f"response={sorted(verifications)}"
+        )
+    verification = copy.deepcopy(verifications[candidate_id])
+    verdict = str(verification.get("verdict") or "")
+    if verdict not in VERDICTS:
+        raise ValueError(f"Invalid local verdict for {candidate_id}: {verdict}")
+    candidate = candidates[candidate_id]
+    flags = {str(value) for value in candidate.get("quality_flags") or []}
+    support_ranges = list(manifest.get("support_ranges") or candidate.get("support_ranges") or [])
+    evidence_ranges = list(verification.get("evidence_time_ranges") or [])
+    overlap = has_evidence_overlap(evidence_ranges, support_ranges)
+    corrected_claim = verification.get("corrected_claim")
+    if verdict == "entailed" and overlap and not (flags & BLOCKING_FLAGS) and not corrected_claim:
+        qc_status = "local_verification_passed"
+        usable = True
+    elif verdict == "contradicted":
+        qc_status = "local_verification_rejected"
+        usable = False
+    else:
+        qc_status = "human_review_required"
+        usable = False
+    candidate["local_verification"] = verification
+    candidate["local_verification_clip_ids"] = list(manifest.get("clip_ids") or [])
+    candidate["local_verifier_model"] = manifest.get("model")
+    candidate["qc_status"] = qc_status
+    candidate["usable_for_reference"] = usable
+    merged["candidates"] = [
+        candidates[str(item.get("candidate_id"))]
+        for item in first_pass_record.get("candidates") or []
+    ]
+    return merged
+
+
 def build_quality_report(records: list[dict[str, Any]]) -> dict[str, Any]:
     candidates = [candidate for record in records for candidate in record.get("candidates") or []]
     status_counts = Counter(str(item.get("qc_status") or "unknown") for item in candidates)
@@ -313,11 +373,15 @@ def human_review_rows(records: list[dict[str, Any]]) -> list[dict[str, str]]:
                     "claim": str(candidate.get("claim") or ""),
                     "qc_status": str(candidate.get("qc_status") or ""),
                     "first_pass_verdict": str(verification.get("verdict") or ""),
+                    "local_verdict": str(
+                        (candidate.get("local_verification") or {}).get("verdict") or ""
+                    ),
                     "quality_flags": json.dumps(candidate.get("quality_flags") or [], ensure_ascii=False),
                     "support_ranges": json.dumps(candidate.get("support_ranges") or [], ensure_ascii=False),
                     "corrected_claim": str(verification.get("corrected_claim") or ""),
                     "reason": str(verification.get("reason") or ""),
                     "human_decision": "",
+                    "approved_claim": "",
                     "human_notes": "",
                 }
             )
@@ -332,45 +396,76 @@ def main() -> None:
     source.add_argument("--manifest-jsonl", required=True)
     source.add_argument("--batch-output-jsonl", required=True)
     source.add_argument("--output-dir", required=True)
+    local = subparsers.add_parser("local")
+    local.add_argument("--first-pass-dir", required=True)
+    local.add_argument("--manifest-jsonl", required=True)
+    local.add_argument("--batch-output-jsonl", required=True)
+    local.add_argument("--output-dir", required=True)
     args = parser.parse_args()
-
-    sessions = id_map(load_session_records(Path(args.session_records)), "source_video_id", "session")
-    manifests = id_map(read_jsonl(Path(args.manifest_jsonl)), "source_video_id", "manifest")
     outputs: dict[str, dict[str, Any]] = {}
     for line in read_jsonl(Path(args.batch_output_jsonl)):
         custom_id, payload = parse_batch_output_line(line)
         if custom_id in outputs:
             raise ValueError(f"Duplicate Batch output custom_id: {custom_id}")
         outputs[custom_id] = payload
-
     output_dir = Path(args.output_dir)
     merged_dir = output_dir / "merged"
     merged_dir.mkdir(parents=True, exist_ok=True)
-    merged_records: list[dict[str, Any]] = []
+    merged_records: list[dict[str, Any]]
+    retry_records: list[dict[str, Any]] = []
     local_queue: list[dict[str, Any]] = []
-    retry_sources: list[dict[str, Any]] = []
-    for current_source, manifest in sorted(manifests.items()):
-        if current_source not in sessions:
-            raise ValueError(f"Manifest has no session record: {current_source}")
-        if current_source not in outputs:
-            retry_sources.append(
-                {"source_video_id": current_source, "reason": "missing_batch_output"}
-            )
-            continue
-        merged, queue = merge_source_verdicts(
-            sessions[current_source], manifest, outputs[current_source]
+    if args.command == "source":
+        sessions = id_map(
+            load_session_records(Path(args.session_records)), "source_video_id", "session"
         )
-        merged_records.append(merged)
-        local_queue.extend(queue)
-        (merged_dir / f"{current_source}.qc.json").write_text(
+        manifests = id_map(read_jsonl(Path(args.manifest_jsonl)), "source_video_id", "manifest")
+        merged_records = []
+        for current_source, manifest in sorted(manifests.items()):
+            if current_source not in sessions:
+                raise ValueError(f"Manifest has no session record: {current_source}")
+            if current_source not in outputs:
+                retry_records.append(
+                    {"source_video_id": current_source, "reason": "missing_batch_output"}
+                )
+                continue
+            merged, queue = merge_source_verdicts(
+                sessions[current_source], manifest, outputs[current_source]
+            )
+            merged_records.append(merged)
+            local_queue.extend(queue)
+    else:
+        first_pass_records = id_map(
+            [
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in sorted(Path(args.first_pass_dir).glob("*.qc.json"))
+            ],
+            "source_video_id",
+            "first-pass QC record",
+        )
+        manifests = id_map(read_jsonl(Path(args.manifest_jsonl)), "record_id", "local manifest")
+        for record_id, manifest in sorted(manifests.items()):
+            source_video_id = str(manifest.get("source_video_id") or "")
+            if source_video_id not in first_pass_records:
+                raise ValueError(f"Local manifest has no first-pass source: {source_video_id}")
+            if record_id not in outputs:
+                retry_records.append(
+                    {"record_id": record_id, "source_video_id": source_video_id, "reason": "missing_batch_output"}
+                )
+                continue
+            first_pass_records[source_video_id] = merge_local_verdict(
+                first_pass_records[source_video_id], manifest, outputs[record_id]
+            )
+        merged_records = [first_pass_records[key] for key in sorted(first_pass_records)]
+
+    for merged in merged_records:
+        (merged_dir / f"{merged['source_video_id']}.qc.json").write_text(
             json.dumps(merged, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-
     write_jsonl(output_dir / "local_review_queue.jsonl", local_queue)
-    write_jsonl(output_dir / "retry_source_queue.jsonl", retry_sources)
+    write_jsonl(output_dir / "retry_queue.jsonl", retry_records)
     report = build_quality_report(merged_records)
-    report["missing_source_outputs"] = len(retry_sources)
+    report["missing_outputs"] = len(retry_records)
     (output_dir / "quality_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -382,7 +477,7 @@ def main() -> None:
         writer.writerows(rows)
     print(
         f"Merged sources={len(merged_records)} candidates={report['candidates']} "
-        f"local_review={len(local_queue)} human_review={len(rows)} missing={len(retry_sources)}",
+        f"local_review={len(local_queue)} human_review={len(rows)} missing={len(retry_records)}",
         flush=True,
     )
 

@@ -209,6 +209,128 @@ def build_source_requests(
     return requests, manifests
 
 
+def build_local_requests(
+    review_items: list[dict[str, Any]],
+    clip_rows: list[dict[str, str]],
+    prompt: str,
+    model: str,
+    fps: float,
+    max_tokens: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not 0.1 <= fps <= 10:
+        raise ValueError("fps must be between 0.1 and 10")
+    clips: dict[str, dict[str, str]] = {}
+    for row in clip_rows:
+        clip_id = str(row.get("clip_id") or row.get("session_id") or "")
+        if not clip_id:
+            raise ValueError("Clip row has no clip_id")
+        if clip_id in clips:
+            raise ValueError(f"Duplicate clip id: {clip_id}")
+        clips[clip_id] = row
+
+    requests: list[dict[str, Any]] = []
+    manifests: list[dict[str, Any]] = []
+    seen_record_ids: set[str] = set()
+    for item in review_items:
+        source_video_id = str(item.get("source_video_id") or "")
+        candidate_id = str(item.get("candidate_id") or "")
+        record_id = str(item.get("record_id") or f"{source_video_id}:{candidate_id}")
+        if not source_video_id or not candidate_id:
+            raise ValueError("Local review item requires source_video_id and candidate_id")
+        if record_id in seen_record_ids:
+            raise ValueError(f"Duplicate local review record id: {record_id}")
+        seen_record_ids.add(record_id)
+        clip_ids = [str(value) for value in item.get("clip_ids") or []]
+        if not clip_ids:
+            raise ValueError(f"Local review item has no clip_ids: {record_id}")
+        selected_clips: list[dict[str, Any]] = []
+        for clip_id in clip_ids:
+            row = clips.get(clip_id)
+            if row is None:
+                raise ValueError(f"Local review item references unknown clip: {clip_id}")
+            if str(row.get("source_video_id") or "") != source_video_id:
+                raise ValueError(f"Local review clip source mismatch: {clip_id}")
+            signed_url = proxy_url(row)
+            if not signed_url:
+                raise ValueError(f"Missing signed URL for local review clip: {clip_id}")
+            selected_clips.append(
+                {
+                    "clip_id": clip_id,
+                    "start_sec": float(row.get("start_sec") or 0),
+                    "end_sec": float(row.get("end_sec") or 0),
+                    "signed_url": signed_url,
+                }
+            )
+        selected_clips.sort(key=lambda value: (value["start_sec"], value["clip_id"]))
+        input_payload = {
+            "source_video_id": source_video_id,
+            "candidate": {
+                "candidate_id": candidate_id,
+                "type": item.get("candidate_type") or item.get("type"),
+                "claim": item.get("claim"),
+                "observed_value": item.get("observed_value"),
+                "support_ranges": list(item.get("support_ranges") or []),
+                "quality_flags": list(item.get("quality_flags") or []),
+                "first_pass_verdict": item.get("first_pass_verdict"),
+            },
+            "clip_ranges": [
+                {
+                    "clip_id": clip["clip_id"],
+                    "start_sec": clip["start_sec"],
+                    "end_sec": clip["end_sec"],
+                }
+                for clip in selected_clips
+            ],
+        }
+        prompt_text = (
+            prompt.rstrip()
+            + "\n\n输入 JSON：\n"
+            + json.dumps(input_payload, ensure_ascii=False, separators=(",", ":"))
+        )
+        content: list[dict[str, Any]] = [
+            {
+                "type": "video_url",
+                "video_url": {"url": clip["signed_url"], "fps": fps},
+            }
+            for clip in selected_clips
+        ]
+        content.append({"type": "text", "text": prompt_text})
+        requests.append(
+            {
+                "custom_id": record_id,
+                "method": "POST",
+                "url": "/v1/chat/completions",
+                "body": {
+                    "model": model,
+                    "enable_thinking": False,
+                    "messages": [{"role": "user", "content": content}],
+                    "temperature": 0,
+                    "max_tokens": max_tokens,
+                },
+            }
+        )
+        manifests.append(
+            {
+                "custom_id": record_id,
+                "record_id": record_id,
+                "source_video_id": source_video_id,
+                "participant_id": item.get("participant_id"),
+                "candidate_id": candidate_id,
+                "model": model,
+                "fps": fps,
+                "clip_ids": [clip["clip_id"] for clip in selected_clips],
+                "clip_ranges": input_payload["clip_ranges"],
+                "support_ranges": list(item.get("support_ranges") or []),
+                "quality_flags": list(item.get("quality_flags") or []),
+                "video_url_sha256": [
+                    hashlib.sha256(clip["signed_url"].encode("utf-8")).hexdigest()
+                    for clip in selected_clips
+                ],
+            }
+        )
+    return requests, manifests
+
+
 def load_session_records(path: Path) -> list[dict[str, Any]]:
     if path.is_dir():
         return [
@@ -240,26 +362,63 @@ def main() -> None:
     source.add_argument("--max-tokens", type=int, default=8192)
     source.add_argument("--video-ids", help="Comma-separated source video ids.")
     source.add_argument("--limit", type=int)
-    args = parser.parse_args()
-
-    sessions = load_session_records(Path(args.session_records))
-    wanted = parse_list(args.video_ids)
-    if wanted is not None:
-        sessions = [record for record in sessions if source_id(record) in wanted]
-    if args.limit is not None:
-        sessions = sessions[: args.limit]
-    requests, manifests = build_source_requests(
-        sessions,
-        read_jsonl(Path(args.session_input_jsonl)),
-        read_csv(Path(args.proxy_url_csv)),
-        Path(args.prompt_file).read_text(encoding="utf-8"),
-        args.model,
-        args.fps,
-        args.max_tokens,
+    local = subparsers.add_parser("local", help="Build one short-evidence QC request per candidate.")
+    local.add_argument("--review-mapping-jsonl", required=True)
+    local.add_argument("--clip-url-csv", required=True)
+    local.add_argument(
+        "--prompt-file", default="prompts/video_candidate_local_verification_schema_zh.txt"
     )
+    local.add_argument("--output-jsonl", required=True)
+    local.add_argument("--manifest-jsonl", required=True)
+    local.add_argument("--model", default="qwen3.7-plus")
+    local.add_argument("--fps", type=float, default=1.0)
+    local.add_argument("--max-tokens", type=int, default=4096)
+    local.add_argument("--record-ids", help="Comma-separated source:candidate record ids.")
+    local.add_argument("--limit", type=int)
+    args = parser.parse_args()
+    if args.command == "source":
+        sessions = load_session_records(Path(args.session_records))
+        wanted = parse_list(args.video_ids)
+        if wanted is not None:
+            sessions = [record for record in sessions if source_id(record) in wanted]
+        if args.limit is not None:
+            sessions = sessions[: args.limit]
+        requests, manifests = build_source_requests(
+            sessions,
+            read_jsonl(Path(args.session_input_jsonl)),
+            read_csv(Path(args.proxy_url_csv)),
+            Path(args.prompt_file).read_text(encoding="utf-8"),
+            args.model,
+            args.fps,
+            args.max_tokens,
+        )
+        candidate_count = sum(len(item["candidate_ids"]) for item in manifests)
+    else:
+        review_items = read_jsonl(Path(args.review_mapping_jsonl))
+        wanted = parse_list(args.record_ids)
+        if wanted is not None:
+            review_items = [
+                item
+                for item in review_items
+                if str(
+                    item.get("record_id")
+                    or f"{item.get('source_video_id')}:{item.get('candidate_id')}"
+                )
+                in wanted
+            ]
+        if args.limit is not None:
+            review_items = review_items[: args.limit]
+        requests, manifests = build_local_requests(
+            review_items,
+            read_csv(Path(args.clip_url_csv)),
+            Path(args.prompt_file).read_text(encoding="utf-8"),
+            args.model,
+            args.fps,
+            args.max_tokens,
+        )
+        candidate_count = len(manifests)
     write_jsonl(Path(args.output_jsonl), requests)
     write_jsonl(Path(args.manifest_jsonl), manifests)
-    candidate_count = sum(len(item["candidate_ids"]) for item in manifests)
     print(
         f"Wrote {len(requests)} requests with {candidate_count} candidates -> {args.output_jsonl}",
         flush=True,

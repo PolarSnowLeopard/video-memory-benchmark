@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from scripts.build_bailian_qc_batch import (  # noqa: E402
+    build_local_requests,
     build_source_requests,
     source_video_id_from_proxy_row,
 )
@@ -144,6 +145,80 @@ class BailianQcBatchBuilderTests(unittest.TestCase):
             ),
             "P30_01",
         )
+
+    def test_local_builder_creates_one_request_per_candidate(self) -> None:
+        review_items = [
+            {
+                "record_id": "P30_01:memcand_1",
+                "source_video_id": "P30_01",
+                "participant_id": "P30",
+                "candidate_id": "memcand_1",
+                "claim": "刀具被放入柜内",
+                "support_ranges": [{"start_sec": 30.0, "end_sec": 90.0}],
+                "quality_flags": [],
+                "clip_ids": ["P30_01_qc_s00001", "P30_01_qc_s00002"],
+            }
+        ]
+        clip_rows = [
+            {
+                "clip_id": "P30_01_qc_s00002",
+                "source_video_id": "P30_01",
+                "start_sec": "60",
+                "end_sec": "90",
+                "signed_url": "https://example.test/c2.mp4",
+            },
+            {
+                "clip_id": "P30_01_qc_s00001",
+                "source_video_id": "P30_01",
+                "start_sec": "30",
+                "end_sec": "60",
+                "signed_url": "https://example.test/c1.mp4",
+            },
+        ]
+
+        requests, manifest = build_local_requests(
+            review_items,
+            clip_rows,
+            prompt="局部核验。",
+            model="qwen3.7-plus",
+            fps=1.0,
+            max_tokens=4096,
+        )
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["custom_id"], "P30_01:memcand_1")
+        content = requests[0]["body"]["messages"][0]["content"]
+        self.assertEqual([item["type"] for item in content], ["video_url", "video_url", "text"])
+        self.assertEqual(content[0]["video_url"]["url"], "https://example.test/c1.mp4")
+        self.assertEqual(manifest[0]["clip_ids"], ["P30_01_qc_s00001", "P30_01_qc_s00002"])
+
+    def test_local_builder_rejects_clip_without_signed_url(self) -> None:
+        with self.assertRaisesRegex(ValueError, "signed URL"):
+            build_local_requests(
+                [
+                    {
+                        "record_id": "P30_01:memcand_1",
+                        "source_video_id": "P30_01",
+                        "candidate_id": "memcand_1",
+                        "claim": "刀具被收纳",
+                        "support_ranges": [{"start_sec": 0.0, "end_sec": 30.0}],
+                        "clip_ids": ["P30_01_qc_s00000"],
+                    }
+                ],
+                [
+                    {
+                        "clip_id": "P30_01_qc_s00000",
+                        "source_video_id": "P30_01",
+                        "start_sec": "0",
+                        "end_sec": "30",
+                        "signed_url": "",
+                    }
+                ],
+                prompt="局部核验。",
+                model="qwen3.7-plus",
+                fps=1.0,
+                max_tokens=4096,
+            )
 
 
 if __name__ == "__main__":

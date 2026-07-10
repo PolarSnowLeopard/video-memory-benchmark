@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.merge_bailian_qc_results import (  # noqa: E402
     build_quality_report,
+    merge_local_verdict,
     merge_source_verdicts,
     parse_batch_output_line,
 )
@@ -195,6 +196,94 @@ class MergeBailianQcResultsTests(unittest.TestCase):
         self.assertEqual(report["candidates"], 1)
         self.assertEqual(report["qc_status_counts"], {"verification_passed": 1})
         self.assertEqual(report["candidate_type_counts"], {"object_location": 1})
+
+    def test_local_entailed_verdict_passes_disputed_candidate(self) -> None:
+        first_pass, _ = merge_source_verdicts(
+            session_with_candidates([candidate("memcand_1")]),
+            source_manifest(["memcand_1"]),
+            {
+                "source_video_id": "P30_01",
+                "verification_results": [verdict("memcand_1", "contradicted")],
+            },
+        )
+        local_manifest = {
+            "record_id": "P30_01:memcand_1",
+            "source_video_id": "P30_01",
+            "candidate_id": "memcand_1",
+            "model": "qwen3.7-plus",
+            "support_ranges": [{"start_sec": 0.0, "end_sec": 120.0}],
+            "clip_ids": ["P30_01_qc_s00000"],
+        }
+        response = {
+            "source_video_id": "P30_01",
+            "verification_results": [verdict("memcand_1", "entailed")],
+        }
+
+        merged = merge_local_verdict(first_pass, local_manifest, response)
+
+        result = merged["candidates"][0]
+        self.assertEqual(result["qc_status"], "local_verification_passed")
+        self.assertTrue(result["usable_for_reference"])
+
+    def test_local_contradicted_verdict_rejects_candidate(self) -> None:
+        first_pass, _ = merge_source_verdicts(
+            session_with_candidates([candidate("memcand_1")]),
+            source_manifest(["memcand_1"]),
+            {
+                "source_video_id": "P30_01",
+                "verification_results": [verdict("memcand_1", "insufficient", ranges=[])],
+            },
+        )
+        merged = merge_local_verdict(
+            first_pass,
+            {
+                "record_id": "P30_01:memcand_1",
+                "source_video_id": "P30_01",
+                "candidate_id": "memcand_1",
+                "model": "qwen3.7-plus",
+                "support_ranges": [{"start_sec": 0.0, "end_sec": 120.0}],
+                "clip_ids": ["P30_01_qc_s00000"],
+            },
+            {
+                "source_video_id": "P30_01",
+                "verification_results": [verdict("memcand_1", "contradicted")],
+            },
+        )
+
+        result = merged["candidates"][0]
+        self.assertEqual(result["qc_status"], "local_verification_rejected")
+        self.assertFalse(result["usable_for_reference"])
+
+    def test_local_corrected_claim_requires_human_review(self) -> None:
+        first_pass, _ = merge_source_verdicts(
+            session_with_candidates([candidate("memcand_1")]),
+            source_manifest(["memcand_1"]),
+            {
+                "source_video_id": "P30_01",
+                "verification_results": [verdict("memcand_1", "insufficient", ranges=[])],
+            },
+        )
+        merged = merge_local_verdict(
+            first_pass,
+            {
+                "record_id": "P30_01:memcand_1",
+                "source_video_id": "P30_01",
+                "candidate_id": "memcand_1",
+                "model": "qwen3.7-plus",
+                "support_ranges": [{"start_sec": 0.0, "end_sec": 120.0}],
+                "clip_ids": ["P30_01_qc_s00000"],
+            },
+            {
+                "source_video_id": "P30_01",
+                "verification_results": [
+                    verdict("memcand_1", "entailed", corrected_claim="刀具位于抽屉")
+                ],
+            },
+        )
+
+        result = merged["candidates"][0]
+        self.assertEqual(result["qc_status"], "human_review_required")
+        self.assertFalse(result["usable_for_reference"])
 
 
 if __name__ == "__main__":
