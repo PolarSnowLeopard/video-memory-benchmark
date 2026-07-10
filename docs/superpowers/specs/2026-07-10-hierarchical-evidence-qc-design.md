@@ -175,14 +175,23 @@ extracted
   -> schema_failed
   -> schema_passed
       -> verification_passed
-      -> verification_rejected
+      -> verification_disputed
       -> verification_uncertain
+      -> human_review_required
+      verification_disputed
           -> local_verification_passed
           -> local_verification_rejected
           -> human_review_required
-              -> human_accepted
-              -> human_rejected
+      verification_uncertain
+          -> local_verification_passed
+          -> local_verification_rejected
+          -> human_review_required
+      human_review_required
+          -> human_accepted
+          -> human_rejected
 ```
+
+其中第一轮 `contradicted` 对应 `verification_disputed`，不能直接作为最终拒绝；只有局部片段二次复核仍明确反驳，才进入 `local_verification_rejected`。
 
 自动进入参考证据库必须同时满足：
 
