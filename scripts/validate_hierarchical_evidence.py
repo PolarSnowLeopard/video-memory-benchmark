@@ -141,7 +141,7 @@ def add_common_issues(layer: str, record: dict[str, Any]) -> list[dict[str, str]
                 issue(
                     layer,
                     record_id,
-                    "blocking",
+                    "warning",
                     "count_limit_exceeded",
                     f"{field} has {len(value)} items; maximum is {maximum}",
                 )
@@ -176,11 +176,12 @@ def check_refs(
     code: str,
     issues: list[dict[str, str]],
     candidate_id: str = "",
+    severity: str = "blocking",
 ) -> None:
     for value in values:
         ref = str(value or "")
         if ref and ref not in allowed:
-            issues.append(issue(layer, record_id, "blocking", code, ref, candidate_id))
+            issues.append(issue(layer, record_id, severity, code, ref, candidate_id))
 
 
 def check_confidences(layer: str, record_id: str, record: dict[str, Any], issues: list[dict[str, str]]) -> None:
@@ -375,6 +376,7 @@ def validate_session_record(
                 "unknown_window_reference",
                 issues,
                 candidate_id,
+                "candidate_blocking" if candidate_id else "warning",
             )
     for field in (
         "state_update_timeline",
@@ -396,6 +398,11 @@ def validate_session_record(
                 "unknown_entity_reference",
                 issues,
                 str(item_value.get("candidate_id") or ""),
+                (
+                    "candidate_blocking"
+                    if item_value.get("candidate_id")
+                    else "warning"
+                ),
             )
 
     affected_candidates: set[str] = set()
@@ -408,6 +415,7 @@ def validate_session_record(
             candidates,
             "unknown_candidate_reference",
             issues,
+            severity="warning",
         )
         affected_candidates.update(str(value) for value in refs if value)
 
@@ -417,6 +425,13 @@ def validate_session_record(
         flags = {str(value) for value in as_list(candidate.get("quality_flags")) if value}
         claim = str(candidate.get("claim") or "")
         support_ids = [str(value) for value in as_list(candidate.get("supporting_window_ids"))]
+        candidate_issue_codes = {
+            item["code"]
+            for item in issues
+            if item.get("candidate_id") == candidate_id
+            and item.get("severity") == "candidate_blocking"
+        }
+        flags.update(candidate_issue_codes)
         if LONG_TERM_RE.search(claim):
             flags.add("long_term_overclaim")
             issues.append(
@@ -452,7 +467,7 @@ def validate_session_record(
             normalized_confidence = "medium"
         candidate["quality_flags"] = sorted(flags)
         candidate["normalized_confidence"] = normalized_confidence
-        candidate["qc_status"] = "schema_passed"
+        candidate["qc_status"] = "schema_failed" if candidate_issue_codes else "schema_passed"
         candidate["usable_for_reference"] = False
 
     expected_id = str(parent.get("session_id") or parent.get("record_id") or "")
@@ -499,6 +514,9 @@ def write_reports(output_dir: Path, layer: str, issues: list[dict[str, str]], ac
         "rejected": rejected,
         "issues": len(issues),
         "blocking_issues": sum(item["severity"] == "blocking" for item in issues),
+        "candidate_blocking_issues": sum(
+            item["severity"] == "candidate_blocking" for item in issues
+        ),
         "issues_by_code": dict(sorted(by_code.items())),
     }
     (output_dir / "report.json").write_text(

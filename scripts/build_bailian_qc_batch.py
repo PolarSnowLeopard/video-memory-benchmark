@@ -121,6 +121,8 @@ def build_source_requests(
         manifest_candidates: list[dict[str, Any]] = []
         seen_candidate_ids: set[str] = set()
         for candidate in session.get("cross_session_evidence_candidates") or []:
+            if candidate.get("qc_status") == "schema_failed":
+                continue
             candidate_id = str(candidate.get("candidate_id") or "")
             if not candidate_id:
                 raise ValueError(f"Candidate without candidate_id in {current_source}")

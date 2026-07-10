@@ -162,12 +162,24 @@ def merge_source_verdicts(
         "candidate_id",
         "verification result",
     )
-    expected_ids = set(session_candidates)
-    if set(manifest_candidates) != expected_ids or set(verifications) != expected_ids:
+    requested_ids = set(manifest_candidates)
+    session_ids = set(session_candidates)
+    if not requested_ids.issubset(session_ids) or set(verifications) != requested_ids:
         raise ValueError(
             "Candidate coverage mismatch: "
-            f"session={sorted(expected_ids)} manifest={sorted(manifest_candidates)} "
+            f"session={sorted(session_ids)} manifest={sorted(manifest_candidates)} "
             f"response={sorted(verifications)}"
+        )
+    excluded_ids = session_ids - requested_ids
+    invalid_excluded = [
+        candidate_id
+        for candidate_id in sorted(excluded_ids)
+        if session_candidates[candidate_id].get("qc_status") != "schema_failed"
+    ]
+    if invalid_excluded:
+        raise ValueError(
+            "Candidate coverage mismatch: non-failed candidates were not requested: "
+            + ", ".join(invalid_excluded)
         )
 
     participant_id = str(session.get("participant_id") or manifest.get("participant_id") or "")
@@ -178,6 +190,11 @@ def merge_source_verdicts(
         for item in session.get("cross_session_evidence_candidates") or []
     ]:
         original = copy.deepcopy(session_candidates[candidate_id])
+        if candidate_id not in requested_ids:
+            original["qc_status"] = "schema_failed"
+            original["usable_for_reference"] = False
+            merged_candidates.append(original)
+            continue
         manifest_candidate = manifest_candidates[candidate_id]
         verification = copy.deepcopy(verifications[candidate_id])
         verdict = str(verification.get("verdict") or "")

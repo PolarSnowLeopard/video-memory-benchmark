@@ -247,9 +247,30 @@ class HierarchicalEvidenceValidatorTests(unittest.TestCase):
             "P30_01_w999"
         ]
 
-        _, issues = validate_session_record(record, valid_session_parent())
+        normalized, issues = validate_session_record(record, valid_session_parent())
 
         self.assertIn("unknown_window_reference", {issue["code"] for issue in issues})
+        candidate = normalized["cross_session_evidence_candidates"][0]
+        self.assertEqual(candidate["qc_status"], "schema_failed")
+        self.assertIn("unknown_window_reference", candidate["quality_flags"])
+
+    def test_count_limit_is_warning_not_record_rejection(self) -> None:
+        record = valid_session_record()
+        record["session_timeline"] = [
+            {
+                "segment_id": f"seg_{index}",
+                "time_range": "0-120",
+                "summary": "处理食材",
+                "supporting_window_ids": ["P30_01_w000"],
+            }
+            for index in range(13)
+        ]
+
+        normalized, issues = validate_session_record(record, valid_session_parent())
+
+        count_issues = [item for item in issues if item["code"] == "count_limit_exceeded"]
+        self.assertEqual([item["severity"] for item in count_issues], ["warning"])
+        self.assertEqual(normalized["quality_summary"]["schema_status"], "passed")
 
     def test_single_window_procedure_candidate_is_marked_for_review(self) -> None:
         record = valid_session_record()

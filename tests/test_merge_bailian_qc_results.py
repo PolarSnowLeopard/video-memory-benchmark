@@ -180,6 +180,23 @@ class MergeBailianQcResultsTests(unittest.TestCase):
                 },
             )
 
+    def test_merge_preserves_schema_failed_candidate_without_requesting_verdict(self) -> None:
+        failed = candidate("memcand_1", flags=["unknown_entity_reference"])
+        failed["qc_status"] = "schema_failed"
+        session = session_with_candidates([failed, candidate("memcand_2")])
+        manifest = source_manifest(["memcand_2"])
+        response = {
+            "source_video_id": "P30_01",
+            "verification_results": [verdict("memcand_2", "entailed")],
+        }
+
+        merged, queue = merge_source_verdicts(session, manifest, response)
+
+        self.assertEqual(queue, [])
+        self.assertEqual(merged["candidates"][0]["qc_status"], "schema_failed")
+        self.assertFalse(merged["candidates"][0]["usable_for_reference"])
+        self.assertEqual(merged["candidates"][1]["qc_status"], "verification_passed")
+
     def test_quality_report_counts_statuses_and_candidate_types(self) -> None:
         merged, _ = merge_source_verdicts(
             session_with_candidates([candidate("memcand_1")]),
