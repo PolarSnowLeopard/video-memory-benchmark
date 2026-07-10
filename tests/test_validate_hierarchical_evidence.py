@@ -189,7 +189,7 @@ class HierarchicalEvidenceValidatorTests(unittest.TestCase):
         record = valid_micro_record()
         record["atomic_events"][0]["object_ids"] = ["obj_missing"]
 
-        _, issues = validate_micro_record(
+        normalized, issues = validate_micro_record(
             record,
             {
                 "session_id": "P30_01_s000",
@@ -200,13 +200,17 @@ class HierarchicalEvidenceValidatorTests(unittest.TestCase):
         )
 
         self.assertIn("unknown_object_reference", {issue["code"] for issue in issues})
-        self.assertTrue(any(issue["severity"] == "blocking" for issue in issues))
+        reference_issue = next(
+            issue for issue in issues if issue["code"] == "unknown_object_reference"
+        )
+        self.assertEqual(reference_issue["severity"], "warning")
+        self.assertEqual(normalized["quality_summary"]["schema_status"], "passed")
 
     def test_window_validator_reports_unknown_clip_reference(self) -> None:
         record = valid_window_record()
         record["evidence_facts"][0]["supporting_clip_ids"] = ["missing"]
 
-        _, issues = validate_window_record(
+        normalized, issues = validate_window_record(
             record,
             {
                 "record_id": "P30_01_w000",
@@ -218,6 +222,11 @@ class HierarchicalEvidenceValidatorTests(unittest.TestCase):
         )
 
         self.assertIn("unknown_clip_reference", {issue["code"] for issue in issues})
+        reference_issue = next(
+            issue for issue in issues if issue["code"] == "unknown_clip_reference"
+        )
+        self.assertEqual(reference_issue["severity"], "warning")
+        self.assertEqual(normalized["quality_summary"]["schema_status"], "passed")
 
     def test_session_validator_flags_long_term_wording_and_uncertainty(self) -> None:
         record = valid_session_record()

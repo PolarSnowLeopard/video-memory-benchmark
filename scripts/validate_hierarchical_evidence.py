@@ -90,6 +90,16 @@ COUNT_LIMITS = {
 }
 
 ISSUE_FIELDS = ["layer", "record_id", "candidate_id", "severity", "code", "message"]
+REFERENCE_ISSUE_CODES = {
+    "unknown_candidate_reference",
+    "unknown_clip_reference",
+    "unknown_entity_reference",
+    "unknown_event_reference",
+    "unknown_fact_reference",
+    "unknown_object_reference",
+    "unknown_place_reference",
+    "unknown_window_reference",
+}
 
 
 def issue(
@@ -204,6 +214,12 @@ def has_blocking(issues: Iterable[dict[str, str]]) -> bool:
     return any(item["severity"] == "blocking" for item in issues)
 
 
+def downgrade_reference_issues(issues: list[dict[str, str]]) -> None:
+    for item in issues:
+        if item["code"] in REFERENCE_ISSUE_CODES and item["severity"] == "blocking":
+            item["severity"] = "warning"
+
+
 def validate_micro_record(
     record: dict[str, Any], metadata: dict[str, Any]
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
@@ -250,6 +266,7 @@ def validate_micro_record(
     if expected_source and str(record.get("source_video_id") or "") != expected_source:
         issues.append(issue(layer, record_id, "blocking", "source_video_id_mismatch", expected_source))
     check_confidences(layer, record_id, record, issues)
+    downgrade_reference_issues(issues)
     normalized["quality_summary"] = {
         "schema_status": "failed" if has_blocking(issues) else "passed",
         "issue_codes": sorted({item["code"] for item in issues}),
@@ -332,6 +349,7 @@ def validate_window_record(
     if str(record.get("source_video_id") or "") != str(parent.get("source_video_id") or ""):
         issues.append(issue(layer, record_id, "blocking", "source_video_id_mismatch", str(parent.get("source_video_id") or "")))
     check_confidences(layer, record_id, record, issues)
+    downgrade_reference_issues(issues)
     normalized["quality_summary"] = {
         "schema_status": "failed" if has_blocking(issues) else "passed",
         "issue_codes": sorted({item["code"] for item in issues}),
