@@ -191,7 +191,7 @@ extracted
           -> human_rejected
 ```
 
-其中第一轮 `contradicted` 对应 `verification_disputed`，不能直接作为最终拒绝；只有局部片段二次复核仍明确反驳，才进入 `local_verification_rejected`。
+其中第一轮 `contradicted` 对应 `verification_disputed`，不能直接作为最终拒绝；只有局部片段二次复核仍明确反驳，且给出与原支持区间重叠的有效时间证据，才进入 `local_verification_rejected`。否则进入 `human_review_required`。
 
 自动进入参考证据库必须同时满足：
 

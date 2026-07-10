@@ -1,4 +1,6 @@
 import sys
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -10,6 +12,7 @@ from scripts.validate_hierarchical_evidence import (  # noqa: E402
     validate_micro_record,
     validate_session_record,
     validate_window_record,
+    validate_directory,
 )
 
 
@@ -290,6 +293,53 @@ class HierarchicalEvidenceValidatorTests(unittest.TestCase):
 
         flags = normalized["cross_session_evidence_candidates"][0]["quality_flags"]
         self.assertIn("single_window_support", flags)
+
+    def test_validate_directory_removes_stale_accepted_record_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            input_path = input_dir / "P30_01.clean.json"
+            input_path.write_text(
+                json.dumps(valid_session_record(), ensure_ascii=False), encoding="utf-8"
+            )
+            validate_directory(
+                "session", input_dir, [valid_session_parent()], output_dir
+            )
+            accepted = output_dir / "accepted" / input_path.name
+            self.assertTrue(accepted.exists())
+
+            invalid = valid_session_record()
+            invalid["source_video_id"] = "P30_XX"
+            input_path.write_text(json.dumps(invalid, ensure_ascii=False), encoding="utf-8")
+            validate_directory(
+                "session", input_dir, [valid_session_parent()], output_dir
+            )
+
+            self.assertFalse(accepted.exists())
+
+    def test_validate_directory_removes_stale_accepted_record_before_parse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            input_path = input_dir / "P30_01.clean.json"
+            input_path.write_text(
+                json.dumps(valid_session_record(), ensure_ascii=False), encoding="utf-8"
+            )
+            validate_directory("session", input_dir, [valid_session_parent()], output_dir)
+            accepted = output_dir / "accepted" / input_path.name
+            self.assertTrue(accepted.exists())
+
+            input_path.write_text("{", encoding="utf-8")
+            with self.assertRaises(json.JSONDecodeError):
+                validate_directory(
+                    "session", input_dir, [valid_session_parent()], output_dir
+                )
+
+            self.assertFalse(accepted.exists())
 
 
 if __name__ == "__main__":

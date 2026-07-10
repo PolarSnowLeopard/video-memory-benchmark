@@ -157,7 +157,7 @@ python3 scripts/build_bailian_qc_batch.py source \
   --max-tokens 8192
 ```
 
-P30 正常应生成 25 条请求。候选数量以校验报告为准；P30 当前试跑为 206 条候选，其中 1 条 `schema_failed`，因此提交 205 条候选。
+P30 正常应生成 25 条请求。候选数量以校验报告为准；P30 当前试跑为 206 条候选，其中 1 条 `schema_failed`，因此提交 205 条候选。如某个 session 的候选全部为 `schema_failed`，请求文件不会为它生成空请求，但 manifest 仍保留该 session，以便合并时完整记录被阻断候选。
 
 先检查请求文件，不要直接提交：
 
@@ -177,6 +177,8 @@ python3 scripts/bailian_batch_job.py submit \
   --name p30-video-evidence-qc \
   --description 'P30 session candidate visual verification'
 ```
+
+`job.json` 已经记录过 Batch ID 时，无论该任务是运行中还是已完成，脚本都拒绝重复提交。只有明确要新建付费任务时才使用 `--force-new`，并建议同时换一个新的任务记录路径。
 
 查询：
 
@@ -216,6 +218,8 @@ $QC/source_qc/human_review.csv
 $QC/source_qc/quality_report.json
 ```
 
+每次合并会先清理输出目录中的旧产物。若 Batch 结果缺行，脚本会写入 `retry_queue.jsonl`、不发布任何部分 `*.qc.json`，并以非零状态退出，不能继续执行最终放行。
+
 状态含义：
 
 - `verification_passed`：完整视频复核支持，且没有阻断质量标记；
@@ -227,6 +231,7 @@ $QC/source_qc/quality_report.json
 ## 6. 为争议候选生成临时局部片段
 
 这一步在能访问 `~/.cos.conf` 的机器上执行。脚本下载需要的完整代理视频，按 30 秒网格去重，只切出 `local_review_queue.jsonl` 涉及的区间。
+先执行 `wc -l "$QC/source_qc/local_review_queue.jsonl"`。如果结果为 0，跳过第 6、7 节，第 8 节直接使用 `$QC/source_qc/merged` 和 `$QC/source_qc/human_review.csv`，不要提交空 Batch 任务。
 
 ```bash
 python3 -m pip install -r requirements/vpn.txt
@@ -240,6 +245,7 @@ python3 scripts/prepare_qc_review_clips.py \
   --mapping-jsonl "$QC/review_clips/candidate_clip_mapping.jsonl" \
   --cleanup-csv "$QC/review_clips/cos_cleanup.csv" \
   --clip-sec 30 \
+  --cut-mode reencode \
   --upload \
   --cos-config ~/.cos.conf \
   --cos-prefix video-benchmark/qc-temp/p30 \
@@ -248,7 +254,7 @@ python3 scripts/prepare_qc_review_clips.py \
   --delete-source-after
 ```
 
-同一个 30 秒区间被多个候选引用时只上传一次。`cos_cleanup.csv` 是远端临时对象清理清单；建议为 `video-benchmark/qc-temp/` 配置对象存储生命周期，任务完成后按清单核对删除。
+同一个 30 秒区间被多个候选引用时只上传一次。默认重编码以保证按帧精确切分；`--delete-source-after` 只删除本次运行临时下载的代理视频，不删除调用方原本就放在缓存目录中的文件。`cos_cleanup.csv` 是远端临时对象清理清单；建议为 `video-benchmark/qc-temp/` 配置对象存储生命周期，任务完成后按清单核对删除。
 
 ## 7. 提交局部视频二次复核
 
@@ -278,11 +284,13 @@ python3 scripts/merge_bailian_qc_results.py local \
   --output-dir "$QC/local_qc"
 ```
 
-局部复核支持、反驳和仍不确定时分别变为：
+局部复核支持、有效反驳和仍不确定时分别变为：
 
 - `local_verification_passed`；
 - `local_verification_rejected`；
 - `human_review_required`。
+
+“有效反驳”必须同时给出与原支持区间重叠且长度大于 0 的证据时间段。没有时间证据的反驳不会自动删除候选，而是转人工。
 
 ## 8. 人工审核和最终放行
 
@@ -292,6 +300,8 @@ python3 scripts/merge_bailian_qc_results.py local \
 - `approved_claim`：只有 `accept_corrected` 时必填；
 - `human_notes`：记录人工证据判断。
 
+`review_fingerprint`、`claim`、`qc_status`、时间区间和模型复核列都是只读字段，不要修改。最终放行会校验指纹，旧版审核表、已变更候选或不再处于 `human_review_required` 状态的候选都无法被人工决定覆盖。
+
 执行：
 
 ```bash
@@ -300,6 +310,8 @@ python3 scripts/finalize_reference_evidence.py \
   --human-review-csv "$QC/local_qc/human_review.csv" \
   --output-dir "$QC/final"
 ```
+
+如果按第 6 节的空队列分支跳过了局部复核，将上述命令中的两个 `$QC/local_qc` 改为 `$QC/source_qc`。
 
 最终输出：
 
@@ -316,7 +328,7 @@ $QC/final/finalization_report.json
 
 - 原始抽取结果永不覆盖；校验、百炼结果和最终结果使用独立目录。
 - 成功的模型抽取默认跳过，失败记录按 ID 重跑。
-- Batch 输入文件和任务记录都有哈希；已有进行中任务默认禁止重复提交。
+- Batch 输入文件和任务记录都有哈希；只要记录中已有 Batch ID，默认就禁止重复提交。
 - 下载已有结果默认报错，只有明确传入 `--overwrite` 才覆盖。
 - `retry_queue.jsonl` 非空时先重试缺失请求，再进行最终放行。
 - 每次全量处理固定模型 ID、提示词提交版本、fps、token 上限和 `pipeline_version`。

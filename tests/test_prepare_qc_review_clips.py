@@ -1,5 +1,6 @@
 import sys
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -7,7 +8,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts.prepare_qc_review_clips import build_clip_specs  # noqa: E402
+from scripts.prepare_qc_review_clips import (  # noqa: E402
+    DEFAULT_CUT_MODE,
+    build_clip_specs,
+    delete_downloaded_sources,
+    index_unique_rows,
+)
 
 
 def review_item(candidate_id: str, start_sec: float, end_sec: float) -> dict:
@@ -23,6 +29,33 @@ def review_item(candidate_id: str, start_sec: float, end_sec: float) -> dict:
 
 
 class PrepareQcReviewClipsTests(unittest.TestCase):
+    def test_default_cut_mode_is_frame_accurate_reencode(self) -> None:
+        self.assertEqual(DEFAULT_CUT_MODE, "reencode")
+
+    def test_duplicate_source_rows_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Duplicate source proxy"):
+            index_unique_rows(
+                [
+                    {"video_id": "P30_01", "signed_url": "https://example.test/a"},
+                    {"video_id": "P30_01", "signed_url": "https://example.test/b"},
+                ],
+                id_getter=lambda row: row["video_id"],
+                label="source proxy",
+            )
+
+    def test_cleanup_deletes_only_paths_downloaded_by_this_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            existing = root / "existing.mp4"
+            downloaded = root / "downloaded.mp4"
+            existing.write_bytes(b"existing")
+            downloaded.write_bytes(b"downloaded")
+
+            delete_downloaded_sources({downloaded})
+
+            self.assertTrue(existing.exists())
+            self.assertFalse(downloaded.exists())
+
     def test_script_help_runs_from_repository_root(self) -> None:
         result = subprocess.run(
             [sys.executable, "scripts/prepare_qc_review_clips.py", "--help"],

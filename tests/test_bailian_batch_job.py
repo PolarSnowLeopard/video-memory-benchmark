@@ -14,6 +14,7 @@ from scripts.bailian_batch_job import (  # noqa: E402
     ensure_can_submit,
     require_api_key,
     sha256_file,
+    write_remote_file,
     write_job_record,
 )
 
@@ -61,6 +62,37 @@ class BailianBatchJobTests(unittest.TestCase):
             payload = json.loads(path.read_text(encoding="utf-8"))
             self.assertNotIn("api_key", payload)
             self.assertEqual(payload["batch_id"], "batch-1")
+
+    def test_completed_job_record_also_requires_force_new(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "job.json"
+            path.write_text(
+                json.dumps({"batch_id": "batch-1", "status": "completed"}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "force-new"):
+                ensure_can_submit(path, force_new=False)
+
+    def test_interrupted_download_leaves_no_final_or_partial_file(self) -> None:
+        class FailingResponse:
+            def write_to_file(self, path):
+                Path(path).write_bytes(b"partial")
+                raise OSError("connection lost")
+
+        class Files:
+            def content(self, file_id):
+                self.file_id = file_id
+                return FailingResponse()
+
+        class Client:
+            files = Files()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "results.jsonl"
+            with self.assertRaisesRegex(OSError, "connection lost"):
+                write_remote_file(Client(), "file-1", output, overwrite=False)
+            self.assertFalse(output.exists())
+            self.assertFalse(output.with_suffix(".jsonl.part").exists())
 
 
 if __name__ == "__main__":

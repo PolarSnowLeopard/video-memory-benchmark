@@ -12,6 +12,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.qc_common import candidate_review_fingerprint
+except ModuleNotFoundError:  # Direct execution via `python3 scripts/...`.
+    from qc_common import candidate_review_fingerprint
+
 
 FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 VERDICTS = {"entailed", "contradicted", "insufficient"}
@@ -27,6 +32,7 @@ HUMAN_REVIEW_FIELDS = [
     "candidate_type",
     "claim",
     "qc_status",
+    "review_fingerprint",
     "first_pass_verdict",
     "local_verdict",
     "quality_flags",
@@ -82,9 +88,9 @@ def ranges_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
         right_end = float(right["end_sec"])
     except (KeyError, TypeError, ValueError):
         return False
-    if left_end < left_start or right_end < right_start:
+    if left_end <= left_start or right_end <= right_start:
         return False
-    return max(left_start, right_start) <= min(left_end, right_end)
+    return max(left_start, right_start) < min(left_end, right_end)
 
 
 def has_evidence_overlap(
@@ -288,7 +294,7 @@ def merge_local_verdict(
     if verdict == "entailed" and overlap and not (flags & BLOCKING_FLAGS) and not corrected_claim:
         qc_status = "local_verification_passed"
         usable = True
-    elif verdict == "contradicted":
+    elif verdict == "contradicted" and overlap:
         qc_status = "local_verification_rejected"
         usable = False
     else:
@@ -365,6 +371,31 @@ def write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
             handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
+def prune_merged_outputs(merged_dir: Path, current_source_ids: set[str]) -> None:
+    if not merged_dir.exists():
+        return
+    expected_names = {f"{source_id}.qc.json" for source_id in current_source_ids}
+    for path in merged_dir.glob("*.qc.json"):
+        if path.name not in expected_names:
+            path.unlink()
+
+
+def reset_merge_outputs(output_dir: Path) -> Path:
+    merged_dir = output_dir / "merged"
+    merged_dir.mkdir(parents=True, exist_ok=True)
+    prune_merged_outputs(merged_dir, set())
+    for name in (
+        "local_review_queue.jsonl",
+        "retry_queue.jsonl",
+        "quality_report.json",
+        "human_review.csv",
+    ):
+        path = output_dir / name
+        if path.exists():
+            path.unlink()
+    return merged_dir
+
+
 def load_session_records(path: Path) -> list[dict[str, Any]]:
     if path.is_dir():
         return [
@@ -380,7 +411,9 @@ def human_review_rows(records: list[dict[str, Any]]) -> list[dict[str, str]]:
         for candidate in record.get("candidates") or []:
             if candidate.get("qc_status") != "human_review_required":
                 continue
-            verification = candidate.get("first_pass_verification") or {}
+            first_verification = candidate.get("first_pass_verification") or {}
+            local_verification = candidate.get("local_verification") or {}
+            review_verification = local_verification or first_verification
             rows.append(
                 {
                     "source_video_id": str(record.get("source_video_id") or ""),
@@ -389,14 +422,15 @@ def human_review_rows(records: list[dict[str, Any]]) -> list[dict[str, str]]:
                     "candidate_type": str(candidate.get("type") or ""),
                     "claim": str(candidate.get("claim") or ""),
                     "qc_status": str(candidate.get("qc_status") or ""),
-                    "first_pass_verdict": str(verification.get("verdict") or ""),
+                    "review_fingerprint": candidate_review_fingerprint(record, candidate),
+                    "first_pass_verdict": str(first_verification.get("verdict") or ""),
                     "local_verdict": str(
                         (candidate.get("local_verification") or {}).get("verdict") or ""
                     ),
                     "quality_flags": json.dumps(candidate.get("quality_flags") or [], ensure_ascii=False),
                     "support_ranges": json.dumps(candidate.get("support_ranges") or [], ensure_ascii=False),
-                    "corrected_claim": str(verification.get("corrected_claim") or ""),
-                    "reason": str(verification.get("reason") or ""),
+                    "corrected_claim": str(review_verification.get("corrected_claim") or ""),
+                    "reason": str(review_verification.get("reason") or ""),
                     "human_decision": "",
                     "approved_claim": "",
                     "human_notes": "",
@@ -419,15 +453,14 @@ def main() -> None:
     local.add_argument("--batch-output-jsonl", required=True)
     local.add_argument("--output-dir", required=True)
     args = parser.parse_args()
+    output_dir = Path(args.output_dir)
+    merged_dir = reset_merge_outputs(output_dir)
     outputs: dict[str, dict[str, Any]] = {}
     for line in read_jsonl(Path(args.batch_output_jsonl)):
         custom_id, payload = parse_batch_output_line(line)
         if custom_id in outputs:
             raise ValueError(f"Duplicate Batch output custom_id: {custom_id}")
         outputs[custom_id] = payload
-    output_dir = Path(args.output_dir)
-    merged_dir = output_dir / "merged"
-    merged_dir.mkdir(parents=True, exist_ok=True)
     merged_records: list[dict[str, Any]]
     retry_records: list[dict[str, Any]] = []
     local_queue: list[dict[str, Any]] = []
@@ -440,6 +473,15 @@ def main() -> None:
         for current_source, manifest in sorted(manifests.items()):
             if current_source not in sessions:
                 raise ValueError(f"Manifest has no session record: {current_source}")
+            if manifest.get("request_skipped"):
+                merged, queue = merge_source_verdicts(
+                    sessions[current_source],
+                    manifest,
+                    {"source_video_id": current_source, "verification_results": []},
+                )
+                merged_records.append(merged)
+                local_queue.extend(queue)
+                continue
             if current_source not in outputs:
                 retry_records.append(
                     {"source_video_id": current_source, "reason": "missing_batch_output"}
@@ -474,12 +516,14 @@ def main() -> None:
             )
         merged_records = [first_pass_records[key] for key in sorted(first_pass_records)]
 
-    for merged in merged_records:
-        (merged_dir / f"{merged['source_video_id']}.qc.json").write_text(
-            json.dumps(merged, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-    write_jsonl(output_dir / "local_review_queue.jsonl", local_queue)
+    if not retry_records:
+        for merged in merged_records:
+            (merged_dir / f"{merged['source_video_id']}.qc.json").write_text(
+                json.dumps(merged, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+    published_local_queue = [] if retry_records else local_queue
+    write_jsonl(output_dir / "local_review_queue.jsonl", published_local_queue)
     write_jsonl(output_dir / "retry_queue.jsonl", retry_records)
     report = build_quality_report(merged_records)
     report["missing_outputs"] = len(retry_records)
@@ -487,7 +531,7 @@ def main() -> None:
         json.dumps(report, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    rows = human_review_rows(merged_records)
+    rows = [] if retry_records else human_review_rows(merged_records)
     with (output_dir / "human_review.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=HUMAN_REVIEW_FIELDS, lineterminator="\n")
         writer.writeheader()
@@ -497,6 +541,10 @@ def main() -> None:
         f"local_review={len(local_queue)} human_review={len(rows)} missing={len(retry_records)}",
         flush=True,
     )
+    if retry_records:
+        raise RuntimeError(
+            f"QC merge has {len(retry_records)} missing Batch outputs; process retry_queue.jsonl"
+        )
 
 
 if __name__ == "__main__":

@@ -11,6 +11,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.qc_common import candidate_review_fingerprint
+except ModuleNotFoundError:  # Direct execution via `python3 scripts/...`.
+    from qc_common import candidate_review_fingerprint
+
 
 ACCEPT_DECISIONS = {"accept", "accept_original", "接受", "接受原事实"}
 ACCEPT_CORRECTED_DECISIONS = {"accept_corrected", "接受修正"}
@@ -73,6 +78,17 @@ def finalize_candidates(
             item = output_candidate(record, candidate)
             human = decisions.get(key, {})
             decision = str(human.get("human_decision") or "").strip()
+            if decision:
+                if candidate.get("qc_status") != "human_review_required":
+                    raise ValueError(
+                        f"Human decision requires human_review_required status: {key}"
+                    )
+                expected_fingerprint = candidate_review_fingerprint(record, candidate)
+                if str(human.get("review_fingerprint") or "") != expected_fingerprint:
+                    raise ValueError(f"Human review fingerprint mismatch: {key}")
+                reviewed_claim = str(human.get("claim") or "").strip()
+                if reviewed_claim != str(candidate.get("claim") or ""):
+                    raise ValueError(f"Human review claim mismatch: {key}")
             if decision in ACCEPT_DECISIONS:
                 item["qc_status"] = "human_accepted"
                 item["usable_for_reference"] = True
@@ -101,6 +117,16 @@ def finalize_candidates(
                 rejected.append(item)
             else:
                 unresolved.append(item)
+    unknown_decisions = sorted(
+        key
+        for key, row in decisions.items()
+        if str(row.get("human_decision") or "").strip() and key not in seen
+    )
+    if unknown_decisions:
+        raise ValueError(
+            "Human review decisions have no matching QC candidate: "
+            + ", ".join(unknown_decisions)
+        )
     return ready, rejected, unresolved
 
 

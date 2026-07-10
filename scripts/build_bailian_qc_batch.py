@@ -107,8 +107,6 @@ def build_source_requests(
             raise ValueError(f"Missing session input for {current_source}")
         current_proxy = proxies.get(current_source)
         signed_url = proxy_url(current_proxy or {})
-        if not signed_url:
-            raise ValueError(f"Missing signed URL for {current_source}")
         window_ranges = {
             str(item.get("window_id") or ""): {
                 "start_sec": float(item.get("start_sec") or 0),
@@ -119,16 +117,18 @@ def build_source_requests(
         }
         candidates: list[dict[str, Any]] = []
         manifest_candidates: list[dict[str, Any]] = []
+        excluded_candidate_ids: list[str] = []
         seen_candidate_ids: set[str] = set()
         for candidate in session.get("cross_session_evidence_candidates") or []:
-            if candidate.get("qc_status") == "schema_failed":
-                continue
             candidate_id = str(candidate.get("candidate_id") or "")
             if not candidate_id:
                 raise ValueError(f"Candidate without candidate_id in {current_source}")
             if candidate_id in seen_candidate_ids:
                 raise ValueError(f"Duplicate candidate id in {current_source}: {candidate_id}")
             seen_candidate_ids.add(candidate_id)
+            if candidate.get("qc_status") == "schema_failed":
+                excluded_candidate_ids.append(candidate_id)
+                continue
             support_window_ids = [str(value) for value in candidate.get("supporting_window_ids") or []]
             support_ranges: list[dict[str, float]] = []
             for window_id in support_window_ids:
@@ -160,7 +160,23 @@ def build_source_requests(
                 }
             )
         if not candidates:
+            manifests.append(
+                {
+                    "custom_id": current_source,
+                    "source_video_id": current_source,
+                    "participant_id": session.get("participant_id"),
+                    "model": model,
+                    "fps": fps,
+                    "video_url_sha256": None,
+                    "candidate_ids": [],
+                    "candidates": [],
+                    "excluded_candidate_ids": excluded_candidate_ids,
+                    "request_skipped": True,
+                }
+            )
             continue
+        if not signed_url:
+            raise ValueError(f"Missing signed URL for {current_source}")
         input_payload = {
             "source_video_id": current_source,
             "participant_id": session.get("participant_id"),
@@ -206,6 +222,8 @@ def build_source_requests(
                 "video_url_sha256": hashlib.sha256(signed_url.encode("utf-8")).hexdigest(),
                 "candidate_ids": [item["candidate_id"] for item in manifest_candidates],
                 "candidates": manifest_candidates,
+                "excluded_candidate_ids": excluded_candidate_ids,
+                "request_skipped": False,
             }
         )
     return requests, manifests

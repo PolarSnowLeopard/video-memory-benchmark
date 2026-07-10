@@ -1,7 +1,9 @@
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,9 +11,13 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.merge_bailian_qc_results import (  # noqa: E402
     build_quality_report,
+    human_review_rows,
     merge_local_verdict,
+    main as merge_main,
     merge_source_verdicts,
     parse_batch_output_line,
+    prune_merged_outputs,
+    reset_merge_outputs,
 )
 
 
@@ -152,6 +158,25 @@ class MergeBailianQcResultsTests(unittest.TestCase):
         self.assertEqual(result["qc_status"], "human_review_required")
         self.assertFalse(result["usable_for_reference"])
 
+    def test_zero_duration_evidence_cannot_auto_pass(self) -> None:
+        merged, queue = merge_source_verdicts(
+            session_with_candidates([candidate("memcand_1")]),
+            source_manifest(["memcand_1"]),
+            {
+                "source_video_id": "P30_01",
+                "verification_results": [
+                    verdict(
+                        "memcand_1",
+                        "entailed",
+                        ranges=[{"start_sec": 10.0, "end_sec": 10.0}],
+                    )
+                ],
+            },
+        )
+
+        self.assertEqual(merged["candidates"][0]["qc_status"], "verification_uncertain")
+        self.assertEqual([item["candidate_id"] for item in queue], ["memcand_1"])
+
     def test_corrected_claim_is_never_auto_applied(self) -> None:
         session = session_with_candidates([candidate("memcand_1")])
         manifest = source_manifest(["memcand_1"])
@@ -214,6 +239,92 @@ class MergeBailianQcResultsTests(unittest.TestCase):
         self.assertEqual(report["qc_status_counts"], {"verification_passed": 1})
         self.assertEqual(report["candidate_type_counts"], {"object_location": 1})
 
+    def test_prune_merged_outputs_removes_stale_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            merged_dir = Path(tmp)
+            current = merged_dir / "P30_01.qc.json"
+            stale = merged_dir / "P30_02.qc.json"
+            current.write_text("{}", encoding="utf-8")
+            stale.write_text("{}", encoding="utf-8")
+
+            prune_merged_outputs(merged_dir, {"P30_01"})
+
+            self.assertTrue(current.exists())
+            self.assertFalse(stale.exists())
+
+    def test_reset_merge_outputs_removes_all_published_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            merged_dir = output_dir / "merged"
+            merged_dir.mkdir()
+            (merged_dir / "P30_01.qc.json").write_text("{}", encoding="utf-8")
+            for name in (
+                "local_review_queue.jsonl",
+                "retry_queue.jsonl",
+                "quality_report.json",
+                "human_review.csv",
+            ):
+                (output_dir / name).write_text("stale", encoding="utf-8")
+
+            reset_merge_outputs(output_dir)
+
+            self.assertEqual(list(merged_dir.glob("*.qc.json")), [])
+            self.assertFalse((output_dir / "local_review_queue.jsonl").exists())
+            self.assertFalse((output_dir / "retry_queue.jsonl").exists())
+            self.assertFalse((output_dir / "quality_report.json").exists())
+            self.assertFalse((output_dir / "human_review.csv").exists())
+
+    def test_missing_batch_output_publishes_no_partial_merged_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_dir = root / "sessions"
+            session_dir.mkdir()
+            (session_dir / "P30_01.clean.json").write_text(
+                json.dumps(
+                    session_with_candidates([candidate("memcand_1")]),
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            manifest_path = root / "manifest.jsonl"
+            manifest_path.write_text(
+                json.dumps(source_manifest(["memcand_1"]), ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            results_path = root / "results.jsonl"
+            results_path.write_text("", encoding="utf-8")
+            output_dir = root / "qc"
+            stale_dir = output_dir / "merged"
+            stale_dir.mkdir(parents=True)
+            (stale_dir / "P30_OLD.qc.json").write_text("{}", encoding="utf-8")
+
+            argv = [
+                "merge_bailian_qc_results.py",
+                "source",
+                "--session-records",
+                str(session_dir),
+                "--manifest-jsonl",
+                str(manifest_path),
+                "--batch-output-jsonl",
+                str(results_path),
+                "--output-dir",
+                str(output_dir),
+            ]
+            with patch.object(sys, "argv", argv), self.assertRaisesRegex(
+                RuntimeError, "missing Batch outputs"
+            ):
+                merge_main()
+
+            self.assertEqual(list(stale_dir.glob("*.qc.json")), [])
+            retry_rows = [
+                json.loads(line)
+                for line in (output_dir / "retry_queue.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line
+            ]
+            self.assertEqual(retry_rows[0]["source_video_id"], "P30_01")
+
     def test_local_entailed_verdict_passes_disputed_candidate(self) -> None:
         first_pass, _ = merge_source_verdicts(
             session_with_candidates([candidate("memcand_1")]),
@@ -271,6 +382,37 @@ class MergeBailianQcResultsTests(unittest.TestCase):
         self.assertEqual(result["qc_status"], "local_verification_rejected")
         self.assertFalse(result["usable_for_reference"])
 
+    def test_local_contradicted_without_overlapping_evidence_requires_human_review(self) -> None:
+        first_pass, _ = merge_source_verdicts(
+            session_with_candidates([candidate("memcand_1")]),
+            source_manifest(["memcand_1"]),
+            {
+                "source_video_id": "P30_01",
+                "verification_results": [verdict("memcand_1", "insufficient", ranges=[])],
+            },
+        )
+        merged = merge_local_verdict(
+            first_pass,
+            {
+                "record_id": "P30_01:memcand_1",
+                "source_video_id": "P30_01",
+                "candidate_id": "memcand_1",
+                "model": "qwen3.7-plus",
+                "support_ranges": [{"start_sec": 0.0, "end_sec": 120.0}],
+                "clip_ids": ["P30_01_qc_s00000"],
+            },
+            {
+                "source_video_id": "P30_01",
+                "verification_results": [
+                    verdict("memcand_1", "contradicted", ranges=[])
+                ],
+            },
+        )
+
+        result = merged["candidates"][0]
+        self.assertEqual(result["qc_status"], "human_review_required")
+        self.assertFalse(result["usable_for_reference"])
+
     def test_local_corrected_claim_requires_human_review(self) -> None:
         first_pass, _ = merge_source_verdicts(
             session_with_candidates([candidate("memcand_1")]),
@@ -301,6 +443,10 @@ class MergeBailianQcResultsTests(unittest.TestCase):
         result = merged["candidates"][0]
         self.assertEqual(result["qc_status"], "human_review_required")
         self.assertFalse(result["usable_for_reference"])
+        rows = human_review_rows([merged])
+        self.assertEqual(rows[0]["corrected_claim"], "刀具位于抽屉")
+        self.assertEqual(rows[0]["reason"], "画面核验结果")
+        self.assertEqual(len(rows[0]["review_fingerprint"]), 64)
 
 
 if __name__ == "__main__":

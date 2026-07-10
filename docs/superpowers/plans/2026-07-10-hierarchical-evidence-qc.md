@@ -317,7 +317,7 @@ Clip IDs use the source ID and 30-second grid index. The mapping records all can
 
 - [ ] **Step 3: Implement cutting, temporary upload, and cleanup manifest**
 
-Reuse binary resolution and COS configuration helpers already used by `run_epic_vpn_session_batch.py`. Do not delete source proxies. Delete temporary local clips only after successful upload when explicitly requested. Generate a cleanup CSV containing bucket, key, and candidate references; do not automatically delete remote objects in the same run.
+Reuse binary resolution and COS configuration helpers already used by `run_epic_vpn_session_batch.py`. Never delete a pre-existing source proxy; an explicitly requested cleanup may delete only source proxies downloaded by the current run. Delete temporary local clips only after successful upload when explicitly requested. Generate a cleanup CSV containing bucket, key, and candidate references; do not automatically delete remote objects in the same run.
 
 - [ ] **Step 4: Write failing tests for local Batch requests and second-pass transitions**
 
@@ -325,7 +325,7 @@ Test `local_verification_passed`, `local_verification_rejected`, and `human_revi
 
 - [ ] **Step 5: Implement local Batch build and merge subcommands**
 
-The local prompt receives one candidate and one or more short video clips. A second `entailed` result can pass only if no blocking quality flags remain. A second `contradicted` result becomes `local_verification_rejected`. A second `insufficient` result becomes `human_review_required`.
+The local prompt receives one candidate and one or more short video clips. A second `entailed` result can pass only if no blocking quality flags remain. A second `contradicted` result becomes `local_verification_rejected` only when it includes a positive-duration evidence range overlapping the original support; otherwise it becomes `human_review_required`. A second `insufficient` result also becomes `human_review_required`.
 
 - [ ] **Step 6: Write failing tests for final export**
 

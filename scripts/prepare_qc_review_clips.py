@@ -44,6 +44,7 @@ URL_FIELDS = [
     "content_type",
     "signed_url",
 ]
+DEFAULT_CUT_MODE = "reencode"
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -75,6 +76,18 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None
         writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         writer.writerows([{field: row.get(field, "") for field in fields} for row in rows])
+
+
+def index_unique_rows(rows, id_getter, label: str):
+    indexed = {}
+    for row in rows:
+        record_id = str(id_getter(row) or "")
+        if not record_id:
+            raise ValueError(f"{label} row has no id")
+        if record_id in indexed:
+            raise ValueError(f"Duplicate {label} id: {record_id}")
+        indexed[record_id] = row
+    return indexed
 
 
 def build_clip_specs(
@@ -141,19 +154,19 @@ def ensure_source_proxy(
     row: dict[str, str],
     source_id: str,
     dry_run: bool,
-) -> Path:
+) -> tuple[Path, bool]:
     local_value = row.get("local_path")
     if local_value and Path(local_value).is_file():
-        return Path(local_value)
+        return Path(local_value), False
     cache_path = source_cache_path(source_cache_root, row, source_id)
     if cache_path.is_file():
-        return cache_path
+        return cache_path, False
     signed_url = proxy_url(row)
     if not signed_url:
         raise ValueError(f"Missing source proxy signed URL: {source_id}")
     print(f"Downloading source proxy: {source_id} -> {cache_path}", flush=True)
     if dry_run:
-        return cache_path
+        return cache_path, True
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = cache_path.with_suffix(cache_path.suffix + ".part")
     with urllib.request.urlopen(signed_url, timeout=3600) as response, temp_path.open("wb") as handle:
@@ -163,7 +176,13 @@ def ensure_source_proxy(
                 break
             handle.write(chunk)
     temp_path.replace(cache_path)
-    return cache_path
+    return cache_path, True
+
+
+def delete_downloaded_sources(paths: set[Path]) -> None:
+    for path in paths:
+        if path.exists():
+            path.unlink()
 
 
 def mapping_records(
@@ -204,7 +223,9 @@ def main() -> None:
     parser.add_argument("--cleanup-csv", required=True)
     parser.add_argument("--clip-sec", type=int, default=30)
     parser.add_argument("--ffmpeg-bin")
-    parser.add_argument("--cut-mode", choices=["copy", "reencode"], default="copy")
+    parser.add_argument(
+        "--cut-mode", choices=["copy", "reencode"], default=DEFAULT_CUT_MODE
+    )
     parser.add_argument("--ffmpeg-threads", type=int, default=2)
     parser.add_argument("--upload", action="store_true")
     parser.add_argument("--cos-config", default="~/.cos.conf")
@@ -218,12 +239,16 @@ def main() -> None:
 
     review_items = read_jsonl(Path(args.review_queue))
     specs, mappings = build_clip_specs(review_items, args.clip_sec)
-    proxy_rows = {
-        source_video_id_from_proxy_row(row): row
-        for row in read_csv(Path(args.proxy_url_csv))
-        if source_video_id_from_proxy_row(row)
-    }
-    existing_rows = {row.get("clip_id", ""): row for row in read_csv(Path(args.output_url_csv))}
+    proxy_rows = index_unique_rows(
+        read_csv(Path(args.proxy_url_csv)),
+        id_getter=source_video_id_from_proxy_row,
+        label="source proxy",
+    )
+    existing_rows = index_unique_rows(
+        read_csv(Path(args.output_url_csv)),
+        id_getter=lambda row: row.get("clip_id"),
+        label="existing review clip",
+    )
     output_root = Path(args.output_root)
     source_cache_root = Path(args.source_cache_root)
     ffmpeg_bin = resolve_binary("ffmpeg", args.ffmpeg_bin, "FFMPEG_BIN", dry_run=args.dry_run)
@@ -239,6 +264,7 @@ def main() -> None:
         cos_client, cos = make_cos_client(Path(args.cos_config).expanduser())
 
     source_paths: dict[str, Path] = {}
+    downloaded_sources: set[Path] = set()
     output_rows: list[dict[str, Any]] = []
     for spec in specs:
         clip_id = spec["clip_id"]
@@ -252,10 +278,12 @@ def main() -> None:
             raise ValueError(f"Missing source proxy row: {source_id}")
         source_path = source_paths.get(source_id)
         if source_path is None:
-            source_path = ensure_source_proxy(
+            source_path, downloaded_by_run = ensure_source_proxy(
                 source_cache_root, source_row, source_id, args.dry_run
             )
             source_paths[source_id] = source_path
+            if downloaded_by_run:
+                downloaded_sources.add(source_path)
         clip_path = (
             output_root
             / spec["participant_id"]
@@ -303,9 +331,7 @@ def main() -> None:
     write_csv(Path(args.cleanup_csv), output_rows, URL_FIELDS)
     write_jsonl(Path(args.mapping_jsonl), mapping_records(review_items, mappings, specs))
     if args.delete_source_after and not args.dry_run:
-        for source_path in source_paths.values():
-            if source_path.exists() and source_path.is_relative_to(source_cache_root):
-                source_path.unlink()
+        delete_downloaded_sources(downloaded_sources)
     print(
         f"Prepared clip_specs={len(specs)} review_items={len(review_items)} upload={args.upload}",
         flush=True,

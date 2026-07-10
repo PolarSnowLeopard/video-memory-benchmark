@@ -155,6 +155,28 @@ class BailianQcBatchBuilderTests(unittest.TestCase):
         self.assertEqual(len(requests), 1)
         self.assertEqual(manifest[0]["candidate_ids"], ["memcand_2"])
 
+    def test_source_builder_preserves_manifest_when_all_candidates_fail_schema(self) -> None:
+        session = session_record()
+        for item in session["cross_session_evidence_candidates"]:
+            item["qc_status"] = "schema_failed"
+
+        requests, manifest = build_source_requests(
+            [session],
+            [session_input()],
+            [{"video_id": "P30_01", "signed_url": "https://example.test/video.mp4"}],
+            prompt="核验候选。",
+            model="qwen3.7-plus",
+            fps=0.5,
+            max_tokens=4096,
+        )
+
+        self.assertEqual(requests, [])
+        self.assertEqual(len(manifest), 1)
+        self.assertTrue(manifest[0]["request_skipped"])
+        self.assertEqual(
+            manifest[0]["excluded_candidate_ids"], ["memcand_1", "memcand_2"]
+        )
+
     def test_proxy_video_id_can_be_derived_from_key(self) -> None:
         self.assertEqual(
             source_video_id_from_proxy_row(

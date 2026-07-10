@@ -13,7 +13,6 @@ from typing import Any
 
 
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-TERMINAL_STATUSES = {"completed", "failed", "cancelled", "expired"}
 SECRET_FIELDS = {"api_key", "secret_key", "authorization"}
 
 
@@ -51,7 +50,7 @@ def ensure_can_submit(job_record_path: Path, force_new: bool) -> None:
         return
     record = read_job_record(job_record_path)
     status = str(record.get("status") or "unknown")
-    if record.get("batch_id") and status not in TERMINAL_STATUSES:
+    if record.get("batch_id"):
         raise RuntimeError(
             f"Existing Batch job {record['batch_id']} is {status}; use --force-new to submit another job"
         )
@@ -163,17 +162,25 @@ def write_remote_file(client: Any, file_id: str, path: Path, overwrite: bool) ->
         raise FileExistsError(f"Output already exists; use --overwrite: {path}")
     response = client.files.content(file_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if hasattr(response, "write_to_file"):
-        response.write_to_file(path)
-        return
-    content = getattr(response, "content", None)
-    if isinstance(content, bytes):
-        path.write_bytes(content)
-        return
-    if hasattr(response, "read"):
-        path.write_bytes(response.read())
-        return
-    raise TypeError(f"Unsupported file content response: {type(response)!r}")
+    temp_path = path.with_name(path.name + ".part")
+    if temp_path.exists():
+        temp_path.unlink()
+    try:
+        if hasattr(response, "write_to_file"):
+            response.write_to_file(temp_path)
+        else:
+            content = getattr(response, "content", None)
+            if isinstance(content, bytes):
+                temp_path.write_bytes(content)
+            elif hasattr(response, "read"):
+                temp_path.write_bytes(response.read())
+            else:
+                raise TypeError(f"Unsupported file content response: {type(response)!r}")
+        temp_path.replace(path)
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
 
 
 def download_job(args: argparse.Namespace) -> dict[str, Any]:
@@ -187,14 +194,18 @@ def download_job(args: argparse.Namespace) -> dict[str, Any]:
     if not output_file_id and not error_file_id:
         write_job_record(job_path, record)
         raise RuntimeError(f"Batch job has no downloadable files; status={record.get('status')}")
+    if output_file_id and not args.output_jsonl:
+        raise ValueError("--output-jsonl is required when the job has an output file")
+    if error_file_id and not args.error_jsonl:
+        raise ValueError("--error-jsonl is required when the job has an error file")
+    if output_file_id and Path(args.output_jsonl).exists() and not args.overwrite:
+        raise FileExistsError(f"Output already exists; use --overwrite: {args.output_jsonl}")
+    if error_file_id and Path(args.error_jsonl).exists() and not args.overwrite:
+        raise FileExistsError(f"Output already exists; use --overwrite: {args.error_jsonl}")
     if output_file_id:
-        if not args.output_jsonl:
-            raise ValueError("--output-jsonl is required when the job has an output file")
         write_remote_file(client, output_file_id, Path(args.output_jsonl), args.overwrite)
         record["downloaded_output_jsonl"] = args.output_jsonl
     if error_file_id:
-        if not args.error_jsonl:
-            raise ValueError("--error-jsonl is required when the job has an error file")
         write_remote_file(client, error_file_id, Path(args.error_jsonl), args.overwrite)
         record["downloaded_error_jsonl"] = args.error_jsonl
     record["updated_at"] = utc_now()

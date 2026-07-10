@@ -562,10 +562,14 @@ def validate_directory(
         "session": validate_session_record,
     }[layer]
     accepted_dir = output_dir / "accepted"
+    accepted_dir.mkdir(parents=True, exist_ok=True)
+    input_paths = sorted(input_dir.glob("*.clean.json"))
+    for stale_path in accepted_dir.glob("*.clean.json"):
+        stale_path.unlink()
     accepted = 0
     rejected = 0
     all_issues: list[dict[str, str]] = []
-    for path in sorted(input_dir.glob("*.clean.json")):
+    for path in input_paths:
         record = json.loads(path.read_text(encoding="utf-8"))
         record_id = record_id_for(layer, record)
         parent = parent_by_id.get(record_id)
@@ -579,9 +583,11 @@ def validate_directory(
         all_issues.extend(current_issues)
         if has_blocking(current_issues):
             rejected += 1
+            accepted_path = accepted_dir / path.name
+            if accepted_path.exists():
+                accepted_path.unlink()
             continue
         accepted += 1
-        accepted_dir.mkdir(parents=True, exist_ok=True)
         (accepted_dir / path.name).write_text(
             json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
