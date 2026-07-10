@@ -23,3 +23,6 @@ __pycache__/
 .venv-report/
 .venv/
 .mplcache/
+
+# Local isolated implementation worktrees.
+.worktrees/
