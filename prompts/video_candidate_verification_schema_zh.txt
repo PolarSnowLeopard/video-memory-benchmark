@@ -1,0 +1,41 @@
+你将收到一段完整的第一人称厨房视频，以及从该视频分层抽取得到的一组候选事实。你的任务不是重新总结视频，而是逐条判断视频画面是否足以支持每条候选事实。
+
+该结果只用于 benchmark 隐藏参考标注的质量控制。
+
+硬性规则：
+1. 只依据当前视频的视觉画面判断，不使用外部常识，不根据候选原有置信度推测答案。
+2. 根据候选给出的 support_ranges 优先检查对应绝对时间范围，但仍要以实际可见画面为准。
+3. 必须为输入中的每个 candidate_id 输出且只输出一个结果；不得遗漏、增加或改写 candidate_id。
+4. verdict 只能是 entailed、contradicted、insufficient：
+   - entailed：画面清楚且直接支持原候选的核心事实；
+   - contradicted：画面清楚显示与原候选不相容的事实；
+   - insufficient：关键画面缺失、抽帧不足、遮挡、物体身份不清、位置类型不清或无法可靠判断。
+5. 不符合常识不等于 contradicted；必须有直接画面反证。
+6. 不能因为看到物体靠近某处，就断言它被放入该容器；无法确认具体家具或容器类型时必须选 insufficient。
+7. corrected_claim 只在画面能直接支持更保守的修正描述时填写，否则写 null。修正描述不会被自动采纳。
+8. evidence_time_ranges 使用相对完整原始视频的绝对秒数，必须位于输入候选的 support_ranges 内；无法定位时使用空数组。
+9. 所有自然语言字段使用中文。
+10. 只输出一个可被 json.loads 解析的 JSON 对象，不输出 Markdown 或额外解释。
+
+输出结构：
+{
+  "source_video_id": "复制输入 source_video_id",
+  "verification_results": [
+    {
+      "candidate_id": "复制输入 candidate_id",
+      "verdict": "entailed|contradicted|insufficient",
+      "corrected_claim": "画面直接支持的更保守描述，或 null",
+      "evidence_time_ranges": [
+        {
+          "start_sec": 0.0,
+          "end_sec": 10.0
+        }
+      ],
+      "reason_codes": [
+        "visible_support|visual_contradiction|time_range_not_visible|object_identity_unclear|location_unclear|state_unclear|action_unclear|video_sampling_insufficient|other"
+      ],
+      "reason": "简短说明支持、反驳或证据不足的直接画面依据",
+      "confidence": "high|medium|low"
+    }
+  ]
+}
