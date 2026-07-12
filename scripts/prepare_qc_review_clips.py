@@ -45,6 +45,7 @@ URL_FIELDS = [
     "signed_url",
 ]
 DEFAULT_CUT_MODE = "reencode"
+DEFAULT_MAX_CLIPS_PER_CANDIDATE = 16
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -90,11 +91,50 @@ def index_unique_rows(rows, id_getter, label: str):
     return indexed
 
 
+def support_grid_indices(item: dict[str, Any], clip_sec: int) -> list[int]:
+    record_id = str(
+        item.get("record_id")
+        or f"{item.get('source_video_id')}:{item.get('candidate_id')}"
+    )
+    support_ranges = item.get("support_ranges") or []
+    if not support_ranges:
+        raise ValueError(f"Review item has no support ranges: {record_id}")
+    indices: set[int] = set()
+    for support in support_ranges:
+        try:
+            start_sec = float(support["start_sec"])
+            end_sec = float(support["end_sec"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Review item has invalid support range: {record_id}") from exc
+        if start_sec < 0 or end_sec <= start_sec:
+            raise ValueError(f"Review item has invalid support range: {record_id}")
+        first_index = int(math.floor(start_sec / clip_sec))
+        last_index = int(math.ceil(end_sec / clip_sec) - 1)
+        indices.update(range(first_index, last_index + 1))
+    return sorted(indices)
+
+
+def uniformly_sample_indices(indices: list[int], limit: int) -> list[int]:
+    if len(indices) <= limit:
+        return indices
+    if limit == 1:
+        return [indices[len(indices) // 2]]
+    positions = [
+        round(sample_index * (len(indices) - 1) / (limit - 1))
+        for sample_index in range(limit)
+    ]
+    return [indices[position] for position in positions]
+
+
 def build_clip_specs(
-    review_items: list[dict[str, Any]], clip_sec: int = 30
+    review_items: list[dict[str, Any]],
+    clip_sec: int = 30,
+    max_clips_per_candidate: int = DEFAULT_MAX_CLIPS_PER_CANDIDATE,
 ) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
     if clip_sec <= 0:
         raise ValueError("clip_sec must be > 0")
+    if max_clips_per_candidate <= 0:
+        raise ValueError("max_clips_per_candidate must be > 0")
     specs: dict[tuple[str, int], dict[str, Any]] = {}
     mappings: dict[str, list[str]] = {}
     for item in review_items:
@@ -104,39 +144,29 @@ def build_clip_specs(
             raise ValueError("Review item requires source_video_id and candidate_id")
         record_id = str(item.get("record_id") or f"{source_video_id}:{candidate_id}")
         clip_ids: list[str] = []
-        support_ranges = item.get("support_ranges") or []
-        if not support_ranges:
-            raise ValueError(f"Review item has no support ranges: {record_id}")
-        for support in support_ranges:
-            try:
-                start_sec = float(support["start_sec"])
-                end_sec = float(support["end_sec"])
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ValueError(f"Review item has invalid support range: {record_id}") from exc
-            if start_sec < 0 or end_sec <= start_sec:
-                raise ValueError(f"Review item has invalid support range: {record_id}")
-            first_index = int(math.floor(start_sec / clip_sec))
-            last_index = int(math.ceil(end_sec / clip_sec) - 1)
-            for clip_index in range(first_index, last_index + 1):
-                clip_id = f"{source_video_id}_qc_s{clip_index:05d}"
-                key = (source_video_id, clip_index)
-                if key not in specs:
-                    specs[key] = {
-                        "clip_id": clip_id,
-                        "participant_id": str(
-                            item.get("participant_id") or source_video_id.split("_", 1)[0]
-                        ),
-                        "source_video_id": source_video_id,
-                        "clip_index": clip_index,
-                        "start_sec": float(clip_index * clip_sec),
-                        "end_sec": float((clip_index + 1) * clip_sec),
-                        "duration_sec": float(clip_sec),
-                        "candidate_ids": [],
-                    }
-                if candidate_id not in specs[key]["candidate_ids"]:
-                    specs[key]["candidate_ids"].append(candidate_id)
-                if clip_id not in clip_ids:
-                    clip_ids.append(clip_id)
+        available_indices = support_grid_indices(item, clip_sec)
+        selected_indices = uniformly_sample_indices(
+            available_indices, max_clips_per_candidate
+        )
+        for clip_index in selected_indices:
+            clip_id = f"{source_video_id}_qc_s{clip_index:05d}"
+            key = (source_video_id, clip_index)
+            if key not in specs:
+                specs[key] = {
+                    "clip_id": clip_id,
+                    "participant_id": str(
+                        item.get("participant_id") or source_video_id.split("_", 1)[0]
+                    ),
+                    "source_video_id": source_video_id,
+                    "clip_index": clip_index,
+                    "start_sec": float(clip_index * clip_sec),
+                    "end_sec": float((clip_index + 1) * clip_sec),
+                    "duration_sec": float(clip_sec),
+                    "candidate_ids": [],
+                }
+            if candidate_id not in specs[key]["candidate_ids"]:
+                specs[key]["candidate_ids"].append(candidate_id)
+            clip_ids.append(clip_id)
         mappings[record_id] = sorted(clip_ids)
     ordered = sorted(specs.values(), key=lambda item: (item["source_video_id"], item["clip_index"]))
     for spec in ordered:
@@ -189,6 +219,7 @@ def mapping_records(
     review_items: list[dict[str, Any]],
     mappings: dict[str, list[str]],
     specs: list[dict[str, Any]],
+    clip_sec: int = 30,
 ) -> list[dict[str, Any]]:
     specs_by_id = {item["clip_id"]: item for item in specs}
     records: list[dict[str, Any]] = []
@@ -200,6 +231,14 @@ def mapping_records(
         clip_ids = mappings[record_id]
         record = dict(item)
         record["clip_ids"] = clip_ids
+        available_count = len(support_grid_indices(item, clip_sec))
+        is_exhaustive = len(clip_ids) == available_count
+        record["clip_selection"] = {
+            "strategy": "all_support_grid_clips" if is_exhaustive else "uniform_grid_cap",
+            "is_exhaustive": is_exhaustive,
+            "available_clip_count": available_count,
+            "selected_clip_count": len(clip_ids),
+        }
         record["clip_ranges"] = [
             {
                 "clip_id": clip_id,
@@ -222,6 +261,11 @@ def main() -> None:
     parser.add_argument("--mapping-jsonl", required=True)
     parser.add_argument("--cleanup-csv", required=True)
     parser.add_argument("--clip-sec", type=int, default=30)
+    parser.add_argument(
+        "--max-clips-per-candidate",
+        type=int,
+        default=DEFAULT_MAX_CLIPS_PER_CANDIDATE,
+    )
     parser.add_argument("--ffmpeg-bin")
     parser.add_argument(
         "--cut-mode", choices=["copy", "reencode"], default=DEFAULT_CUT_MODE
@@ -238,7 +282,9 @@ def main() -> None:
     args = parser.parse_args()
 
     review_items = read_jsonl(Path(args.review_queue))
-    specs, mappings = build_clip_specs(review_items, args.clip_sec)
+    specs, mappings = build_clip_specs(
+        review_items, args.clip_sec, args.max_clips_per_candidate
+    )
     proxy_rows = index_unique_rows(
         read_csv(Path(args.proxy_url_csv)),
         id_getter=source_video_id_from_proxy_row,
@@ -329,11 +375,14 @@ def main() -> None:
 
     write_csv(Path(args.output_url_csv), output_rows, URL_FIELDS)
     write_csv(Path(args.cleanup_csv), output_rows, URL_FIELDS)
-    write_jsonl(Path(args.mapping_jsonl), mapping_records(review_items, mappings, specs))
+    mapping_output = mapping_records(review_items, mappings, specs, args.clip_sec)
+    write_jsonl(Path(args.mapping_jsonl), mapping_output)
     if args.delete_source_after and not args.dry_run:
         delete_downloaded_sources(downloaded_sources)
     print(
-        f"Prepared clip_specs={len(specs)} review_items={len(review_items)} upload={args.upload}",
+        f"Prepared clip_specs={len(specs)} review_items={len(review_items)} "
+        f"sampled={sum(not item['clip_selection']['is_exhaustive'] for item in mapping_output)} "
+        f"upload={args.upload}",
         flush=True,
     )
 

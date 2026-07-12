@@ -10,9 +10,11 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.prepare_qc_review_clips import (  # noqa: E402
     DEFAULT_CUT_MODE,
+    DEFAULT_MAX_CLIPS_PER_CANDIDATE,
     build_clip_specs,
     delete_downloaded_sources,
     index_unique_rows,
+    mapping_records,
 )
 
 
@@ -31,6 +33,7 @@ def review_item(candidate_id: str, start_sec: float, end_sec: float) -> dict:
 class PrepareQcReviewClipsTests(unittest.TestCase):
     def test_default_cut_mode_is_frame_accurate_reencode(self) -> None:
         self.assertEqual(DEFAULT_CUT_MODE, "reencode")
+        self.assertEqual(DEFAULT_MAX_CLIPS_PER_CANDIDATE, 16)
 
     def test_duplicate_source_rows_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "Duplicate source proxy"):
@@ -94,6 +97,29 @@ class PrepareQcReviewClipsTests(unittest.TestCase):
                 "P30_01_qc_s00002",
                 "P30_01_qc_s00003",
             ],
+        )
+
+    def test_oversized_support_range_is_uniformly_sampled(self) -> None:
+        item = review_item("memcand_1", 0, 3000)
+
+        specs, mappings = build_clip_specs(
+            [item], clip_sec=30, max_clips_per_candidate=16
+        )
+
+        selected = mappings["P30_01:memcand_1"]
+        self.assertEqual(len(selected), 16)
+        self.assertEqual(selected[0], "P30_01_qc_s00000")
+        self.assertEqual(selected[-1], "P30_01_qc_s00099")
+        self.assertEqual(len(specs), 16)
+        records = mapping_records([item], mappings, specs, clip_sec=30)
+        self.assertEqual(
+            records[0]["clip_selection"],
+            {
+                "strategy": "uniform_grid_cap",
+                "is_exhaustive": False,
+                "available_clip_count": 100,
+                "selected_clip_count": 16,
+            },
         )
 
     def test_empty_or_reversed_support_range_is_rejected(self) -> None:

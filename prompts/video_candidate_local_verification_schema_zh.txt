@@ -10,8 +10,9 @@
    - insufficient：关键画面仍然不可见、遮挡、物体身份不清、位置类型不清或无法可靠判断。
 5. 不能因为物体接近某处就断言被放入该容器；无法确认抽屉、橱柜、冰箱等具体类型时选择 insufficient。
 6. corrected_claim 只在画面明确支持更保守描述时填写，否则写 null；它不会被自动采纳。
-7. 所有自然语言字段使用中文。
-8. 只输出一个可被 json.loads 解析的 JSON 对象，不输出 Markdown 或额外解释。
+7. 检查 clip_selection。当 is_exhaustive=false 时，输入只是对原支持区间的均匀采样；不能因为采样片段中未出现某动作，就判定该动作从未发生。若反驳依赖未观察区间，必须选择 insufficient。
+8. 所有自然语言字段使用中文。
+9. 只输出一个可被 json.loads 解析的 JSON 对象，不输出 Markdown 或额外解释。
 
 输出结构：
 {

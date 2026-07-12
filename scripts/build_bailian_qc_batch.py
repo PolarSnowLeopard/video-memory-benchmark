@@ -292,6 +292,13 @@ def build_local_requests(
                 "support_ranges": list(item.get("support_ranges") or []),
                 "quality_flags": list(item.get("quality_flags") or []),
                 "first_pass_verdict": item.get("first_pass_verdict"),
+                "clip_selection": item.get("clip_selection")
+                or {
+                    "strategy": "unspecified",
+                    "is_exhaustive": True,
+                    "available_clip_count": len(selected_clips),
+                    "selected_clip_count": len(selected_clips),
+                },
             },
             "clip_ranges": [
                 {
@@ -342,6 +349,7 @@ def build_local_requests(
                 "clip_ranges": input_payload["clip_ranges"],
                 "support_ranges": list(item.get("support_ranges") or []),
                 "quality_flags": list(item.get("quality_flags") or []),
+                "clip_selection": input_payload["candidate"]["clip_selection"],
                 "video_url_sha256": [
                     hashlib.sha256(clip["signed_url"].encode("utf-8")).hexdigest()
                     for clip in selected_clips

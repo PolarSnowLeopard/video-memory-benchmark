@@ -196,6 +196,12 @@ class BailianQcBatchBuilderTests(unittest.TestCase):
                 "support_ranges": [{"start_sec": 30.0, "end_sec": 90.0}],
                 "quality_flags": [],
                 "clip_ids": ["P30_01_qc_s00001", "P30_01_qc_s00002"],
+                "clip_selection": {
+                    "strategy": "uniform_grid_cap",
+                    "is_exhaustive": False,
+                    "available_clip_count": 8,
+                    "selected_clip_count": 2,
+                },
             }
         ]
         clip_rows = [
@@ -230,6 +236,9 @@ class BailianQcBatchBuilderTests(unittest.TestCase):
         self.assertEqual([item["type"] for item in content], ["video_url", "video_url", "text"])
         self.assertEqual(content[0]["video_url"]["url"], "https://example.test/c1.mp4")
         self.assertEqual(manifest[0]["clip_ids"], ["P30_01_qc_s00001", "P30_01_qc_s00002"])
+        prompt_payload = json.loads(content[-1]["text"].split("输入 JSON：\n", 1)[1])
+        self.assertFalse(prompt_payload["candidate"]["clip_selection"]["is_exhaustive"])
+        self.assertEqual(manifest[0]["clip_selection"]["available_clip_count"], 8)
 
     def test_local_builder_rejects_clip_without_signed_url(self) -> None:
         with self.assertRaisesRegex(ValueError, "signed URL"):

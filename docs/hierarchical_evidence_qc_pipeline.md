@@ -245,6 +245,7 @@ python3 scripts/prepare_qc_review_clips.py \
   --mapping-jsonl "$QC/review_clips/candidate_clip_mapping.jsonl" \
   --cleanup-csv "$QC/review_clips/cos_cleanup.csv" \
   --clip-sec 30 \
+  --max-clips-per-candidate 16 \
   --cut-mode reencode \
   --upload \
   --cos-config ~/.cos.conf \
@@ -254,7 +255,7 @@ python3 scripts/prepare_qc_review_clips.py \
   --delete-source-after
 ```
 
-同一个 30 秒区间被多个候选引用时只上传一次。默认重编码以保证按帧精确切分；`--delete-source-after` 只删除本次运行临时下载的代理视频，不删除调用方原本就放在缓存目录中的文件。`cos_cleanup.csv` 是远端临时对象清理清单；建议为 `video-benchmark/qc-temp/` 配置对象存储生命周期，任务完成后按清单核对删除。
+同一个 30 秒区间被多个候选引用时只上传一次。单个候选覆盖超过 16 个网格时，按时间均匀选取 16 段，并在 `clip_selection` 中标记为非穷尽采样；局部复核不得依据未观察区间做否定结论。默认重编码以保证按帧精确切分；`--delete-source-after` 只删除本次运行临时下载的代理视频，不删除调用方原本就放在缓存目录中的文件。`cos_cleanup.csv` 是远端临时对象清理清单；建议为 `video-benchmark/qc-temp/` 配置对象存储生命周期，任务完成后按清单核对删除。
 
 ## 7. 提交局部视频二次复核
 
