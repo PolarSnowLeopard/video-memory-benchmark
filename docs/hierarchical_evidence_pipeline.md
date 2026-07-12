@@ -229,7 +229,24 @@ P30 完整试跑的规模：
 
 实际状态中可能出现 `skipped`，通常表示对应 clean JSON 已存在、脚本跳过重算，不等于失败。
 
-## 8. 结果检查
+## 8. 多参与者统一抽取
+
+当代理视频清单已经按参与者放在同一目录时，可以用编排器顺序执行完整三层流程：
+
+```bash
+python3 scripts/run_hierarchical_extraction_participants.py \
+  --manifest-dir data/cluster_inputs/epic37_proxy_manifests \
+  --participants all \
+  --expected-participants 37 \
+  --base-url http://127.0.0.1:8000/v1 \
+  --model qwen35-a3b
+```
+
+编排器对每个参与者依次执行：30 秒切分、micro 抽取与校验、120 秒 window 聚合与校验、完整 source/session 聚合与校验。每层失败结果最多自动重试 3 次，数量或结构校验不完整时立即停止。成功的 `*.clean.json` 会被复用，因此相同命令可直接断点续跑，不会覆盖已有成功结果。
+
+micro 校验通过并构建 window 输入后，默认删除该参与者在集群上的代理视频缓存和 30 秒片段，以限制磁盘峰值；原始代理视频仍保留在 COS。调试时可加 `--keep-local-video` 保留本地视频。编排器会自行启动运行期间所需的本地 HTTP 服务；如果已经手动启动，可加 `--external-http-server`。
+
+## 9. 结果检查
 
 统计三层状态：
 
@@ -262,7 +279,7 @@ find outputs/epic_kitchens_100/p30_windows_120s -name '*.clean.json' | wc -l
 find outputs/epic_kitchens_100/p30_sessions_full -name '*.clean.json' | wc -l
 ```
 
-## 9. 失败重跑
+## 10. 失败重跑
 
 查看失败项：
 
