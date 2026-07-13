@@ -6,14 +6,15 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
-FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+if __package__:
+    from .llm_json_cleaning import clean_chat_completion_response, extract_json_text
+else:
+    from llm_json_cleaning import clean_chat_completion_response, extract_json_text
 
 STATUS_FIELDS = [
     "updated_at",
@@ -22,6 +23,7 @@ STATUS_FIELDS = [
     "record_id",
     "raw_output",
     "clean_output",
+    "clean_method",
     "finish_reason",
     "prompt_tokens",
     "completion_tokens",
@@ -86,31 +88,6 @@ def record_id_from_record(record: dict[str, Any]) -> str:
 def make_prompt_text(prompt: str, record: dict[str, Any]) -> str:
     payload = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
     return f"{prompt.rstrip()}\n\n输入 JSON：\n{payload}"
-
-
-def extract_json_text(text: str) -> str:
-    text = text.strip()
-    match = FENCE_RE.search(text)
-    if match:
-        text = match.group(1).strip()
-    if text.startswith("{") and text.endswith("}"):
-        return text
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        return text[start : end + 1]
-    raise ValueError("No JSON object found in assistant content")
-
-
-def clean_response(raw_path: Path, clean_path: Path) -> None:
-    response = json.loads(raw_path.read_text(encoding="utf-8"))
-    message = response["choices"][0]["message"]
-    content = message.get("content") or message.get("reasoning")
-    if not content:
-        raise ValueError("Assistant content is empty")
-    payload = json.loads(extract_json_text(content))
-    clean_path.parent.mkdir(parents=True, exist_ok=True)
-    clean_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def usage_fields(response: dict[str, Any]) -> dict[str, str]:
@@ -189,12 +166,35 @@ def main() -> None:
                 "record_id": record_id,
                 "raw_output": str(raw_path),
                 "clean_output": str(clean_path),
+                "clean_method": "existing",
                 "finish_reason": "",
                 **usage_fields({}),
             }
             upsert_csv(status_csv, status, STATUS_FIELDS, "record_id")
             print("Skipped existing clean output", flush=True)
             continue
+
+        if raw_path.exists() and not clean_path.exists() and not args.overwrite:
+            try:
+                response = json.loads(raw_path.read_text(encoding="utf-8"))
+                clean_method = clean_chat_completion_response(raw_path, clean_path)
+            except Exception as exc:
+                print(f"Existing raw output is not recoverable: {exc!r}", flush=True)
+            else:
+                status = {
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "status": "ok",
+                    "error": "",
+                    "record_id": record_id,
+                    "raw_output": str(raw_path),
+                    "clean_output": str(clean_path),
+                    "clean_method": clean_method,
+                    "finish_reason": str((response.get("choices") or [{}])[0].get("finish_reason", "")),
+                    **usage_fields(response),
+                }
+                upsert_csv(status_csv, status, STATUS_FIELDS, "record_id")
+                print(f"Recovered existing raw output with {clean_method}", flush=True)
+                continue
 
         try:
             prompt_text = make_prompt_text(prompt, record)
@@ -203,8 +203,9 @@ def main() -> None:
             raw_path.write_text(json.dumps(response, ensure_ascii=False, indent=2), encoding="utf-8")
             finish_reason = str((response.get("choices") or [{}])[0].get("finish_reason", ""))
             clean_error = ""
+            clean_method = ""
             try:
-                clean_response(raw_path, clean_path)
+                clean_method = clean_chat_completion_response(raw_path, clean_path)
                 status_value = "ok"
             except Exception as exc:
                 status_value = "raw_only"
@@ -216,6 +217,7 @@ def main() -> None:
                 "record_id": record_id,
                 "raw_output": str(raw_path),
                 "clean_output": str(clean_path if clean_path.exists() else ""),
+                "clean_method": clean_method,
                 "finish_reason": finish_reason,
                 **usage_fields(response),
             }
@@ -227,6 +229,7 @@ def main() -> None:
                 "record_id": record_id,
                 "raw_output": str(raw_path),
                 "clean_output": "",
+                "clean_method": "",
                 "finish_reason": "",
                 **usage_fields({}),
             }
