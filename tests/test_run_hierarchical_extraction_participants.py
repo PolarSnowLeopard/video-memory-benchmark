@@ -47,6 +47,31 @@ class HierarchicalExtractionParticipantTests(unittest.TestCase):
 
         self.assertEqual(len(calls), 2)
 
+    def test_retry_targets_only_missing_records_and_raises_token_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            (output_dir / "record_1.clean.json").write_text("{}")
+            calls: list[list[str]] = []
+
+            def runner(command: list[str]) -> None:
+                calls.append(command)
+                if len(calls) == 2:
+                    (output_dir / "record_2.clean.json").write_text("{}")
+
+            run_until_clean(
+                label="micro",
+                output_dir=output_dir,
+                expected=2,
+                expected_ids={"record_1", "record_2"},
+                attempts=2,
+                command=["extract", "--max-tokens", "4096"],
+                final_max_tokens=8192,
+                runner=runner,
+            )
+
+        self.assertEqual(calls[0][-2:], ["--record-ids", "record_2"])
+        self.assertEqual(calls[1], ["extract", "--max-tokens", "8192", "--record-ids", "record_2"])
+
     def test_fails_when_validation_report_is_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             report = Path(tmp) / "report.json"

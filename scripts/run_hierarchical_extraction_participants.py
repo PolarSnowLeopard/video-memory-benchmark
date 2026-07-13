@@ -49,18 +49,37 @@ def discover_participant_manifests(manifest_dir: Path, participants: str) -> lis
     return [(participant, available[participant]) for participant in wanted]
 
 
-def count_csv_rows(path: Path) -> int:
+def clean_output_ids(output_dir: Path) -> set[str]:
+    suffix = ".clean.json"
+    if not output_dir.exists():
+        return set()
+    return {path.name[: -len(suffix)] for path in output_dir.glob(f"*{suffix}")}
+
+
+def csv_record_ids(path: Path, field: str) -> set[str]:
     with path.open(newline="", encoding="utf-8") as handle:
-        return sum(1 for _ in csv.DictReader(handle))
+        return {row[field] for row in csv.DictReader(handle) if row.get(field)}
 
 
-def count_jsonl_rows(path: Path) -> int:
+def jsonl_record_ids(path: Path, field: str = "record_id") -> set[str]:
     with path.open(encoding="utf-8") as handle:
-        return sum(1 for line in handle if line.strip())
+        return {
+            str(record[field])
+            for line in handle
+            if line.strip()
+            for record in [json.loads(line)]
+            if record.get(field)
+        }
 
 
-def count_clean_outputs(output_dir: Path) -> int:
-    return sum(1 for _ in output_dir.glob("*.clean.json")) if output_dir.exists() else 0
+def replace_command_option(command: list[str], option: str, value: str) -> list[str]:
+    updated = list(command)
+    if option in updated:
+        index = updated.index(option)
+        updated[index + 1] = value
+    else:
+        updated.extend([option, value])
+    return updated
 
 
 def run_until_clean(
@@ -68,25 +87,50 @@ def run_until_clean(
     label: str,
     output_dir: Path,
     expected: int,
+    expected_ids: set[str] | None = None,
     attempts: int,
     command: list[str],
+    final_max_tokens: int | None = None,
     runner: Callable[[list[str]], None],
 ) -> None:
+    if expected_ids is not None and len(expected_ids) != expected:
+        raise ValueError(f"{label}: expected count {expected} does not match {len(expected_ids)} record ids")
+
     for attempt in range(1, attempts + 1):
-        actual = count_clean_outputs(output_dir)
+        clean_ids = clean_output_ids(output_dir)
+        if expected_ids is not None:
+            extra_ids = sorted(clean_ids - expected_ids)
+            if extra_ids:
+                raise RuntimeError(f"{label}: stale clean outputs: {', '.join(extra_ids[:20])}")
+            missing_ids = sorted(expected_ids - clean_ids)
+            actual = expected - len(missing_ids)
+        else:
+            missing_ids = []
+            actual = len(clean_ids)
         if actual == expected:
             return
         if actual > expected:
             raise RuntimeError(f"{label}: found {actual} clean outputs, expected {expected}; remove stale outputs")
-        print(f"{label}: attempt {attempt}/{attempts}, clean={actual}/{expected}", flush=True)
+        missing_text = f", missing={','.join(missing_ids[:20])}" if missing_ids else ""
+        print(f"{label}: attempt {attempt}/{attempts}, clean={actual}/{expected}{missing_text}", flush=True)
+        retry_command = list(command)
+        if final_max_tokens is not None and attempt == attempts:
+            retry_command = replace_command_option(retry_command, "--max-tokens", str(final_max_tokens))
+        if missing_ids and len(missing_ids) < expected:
+            retry_command.extend(["--record-ids", ",".join(missing_ids)])
         try:
-            runner(command)
+            runner(retry_command)
         except subprocess.CalledProcessError as exc:
             print(f"{label}: command failed with return code {exc.returncode}", flush=True)
 
-    actual = count_clean_outputs(output_dir)
+    clean_ids = clean_output_ids(output_dir)
+    missing_ids = sorted(expected_ids - clean_ids) if expected_ids is not None else []
+    actual = expected - len(missing_ids) if expected_ids is not None else len(clean_ids)
     if actual != expected:
-        raise RuntimeError(f"{label}: found {actual} clean outputs after {attempts} attempts, expected {expected}")
+        missing_text = f"; missing record ids: {', '.join(missing_ids[:50])}" if missing_ids else ""
+        raise RuntimeError(
+            f"{label}: found {actual} clean outputs after {attempts} attempts, expected {expected}{missing_text}"
+        )
 
 
 def require_validation_complete(report_path: Path, expected: int, label: str) -> None:
@@ -158,12 +202,15 @@ def extract_participant(
         ]
     )
 
-    expected_micro = count_csv_rows(micro_csv)
+    expected_micro_ids = csv_record_ids(micro_csv, "session_id")
+    expected_micro = len(expected_micro_ids)
     run_until_clean(
         label=f"{participant} micro",
         output_dir=micro_output,
         expected=expected_micro,
+        expected_ids=expected_micro_ids,
         attempts=args.attempts,
+        final_max_tokens=8192,
         runner=command_runner,
         command=[
             args.python,
@@ -226,12 +273,15 @@ def extract_participant(
         shutil.rmtree(data_root / "sessions" / participant, ignore_errors=True)
         print(f"{participant}: removed local proxy videos and 30-second clips", flush=True)
 
-    expected_window = count_jsonl_rows(window_input)
+    expected_window_ids = jsonl_record_ids(window_input)
+    expected_window = len(expected_window_ids)
     run_until_clean(
         label=f"{participant} window",
         output_dir=window_output,
         expected=expected_window,
+        expected_ids=expected_window_ids,
         attempts=args.attempts,
+        final_max_tokens=12288,
         runner=command_runner,
         command=[
             args.python,
@@ -285,12 +335,15 @@ def extract_participant(
         ]
     )
 
-    expected_session = count_jsonl_rows(session_input)
+    expected_session_ids = jsonl_record_ids(session_input)
+    expected_session = len(expected_session_ids)
     run_until_clean(
         label=f"{participant} session",
         output_dir=session_output,
         expected=expected_session,
+        expected_ids=expected_session_ids,
         attempts=args.attempts,
+        final_max_tokens=24576,
         runner=command_runner,
         command=[
             args.python,

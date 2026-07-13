@@ -242,7 +242,7 @@ python3 scripts/run_hierarchical_extraction_participants.py \
   --model qwen35-a3b
 ```
 
-编排器对每个参与者依次执行：30 秒切分、micro 抽取与校验、120 秒 window 聚合与校验、完整 source/session 聚合与校验。每层失败结果最多自动重试 3 次，数量或结构校验不完整时立即停止。成功的 `*.clean.json` 会被复用，因此相同命令可直接断点续跑，不会覆盖已有成功结果。
+编排器对每个参与者依次执行：30 秒切分、micro 抽取与校验、120 秒 window 聚合与校验、完整 source/session 聚合与校验。每层失败结果最多自动重试 3 次；重试只请求缺失记录，最后一次会提高输出 token 上限。数量或结构校验仍不完整时立即停止并报告缺失编号。成功的 `*.clean.json` 会被复用，因此相同命令可直接断点续跑，不会覆盖已有成功结果。
 
 micro 校验通过并构建 window 输入后，默认删除该参与者在集群上的代理视频缓存和 30 秒片段，以限制磁盘峰值；原始代理视频仍保留在 COS。调试时可加 `--keep-local-video` 保留本地视频。编排器会自行启动运行期间所需的本地 HTTP 服务；如果已经手动启动，可加 `--external-http-server`。
 
