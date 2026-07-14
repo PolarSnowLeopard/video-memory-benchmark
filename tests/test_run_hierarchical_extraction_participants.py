@@ -16,6 +16,7 @@ from scripts.run_hierarchical_extraction_participants import (  # noqa: E402
     build_session_prepare_command,
     discover_participant_manifests,
     http_server_serves_directory,
+    pipeline_status_path,
     require_validation_complete,
     run_until_clean,
     select_manifest_shard,
@@ -129,6 +130,17 @@ class HierarchicalExtractionParticipantTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["status"], "ok")
+
+    def test_multi_shard_status_files_are_independent(self) -> None:
+        root = Path("outputs")
+        self.assertEqual(
+            pipeline_status_path(root, 1, 0),
+            root / "participant_pipeline_status.csv",
+        )
+        self.assertEqual(
+            pipeline_status_path(root, 4, 2),
+            root / "participant_pipeline_status_shard_02_of_04.csv",
+        )
 
     def test_retry_targets_only_missing_records_and_raises_token_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

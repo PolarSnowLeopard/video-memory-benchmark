@@ -18,6 +18,11 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
+if __package__:
+    from .pipeline_progress import format_duration, progress_line
+else:
+    from pipeline_progress import format_duration, progress_line
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_SUFFIX = "_all_videos_proxy_540p16_urls.csv"
@@ -30,6 +35,7 @@ PIPELINE_STATUS_FIELDS = [
     "status",
     "started_at",
     "finished_at",
+    "elapsed_sec",
     "manifest",
     "error",
 ]
@@ -138,6 +144,12 @@ def select_manifest_shard(
     if not 0 <= shard_index < num_shards:
         raise ValueError("shard_index must be in [0, num_shards)")
     return [item for index, item in enumerate(manifests) if index % num_shards == shard_index]
+
+
+def pipeline_status_path(output_root: Path, num_shards: int, shard_index: int) -> Path:
+    if num_shards == 1:
+        return output_root / "participant_pipeline_status.csv"
+    return output_root / f"participant_pipeline_status_shard_{shard_index:02d}_of_{num_shards:02d}.csv"
 
 
 def clean_output_ids(output_dir: Path) -> set[str]:
@@ -608,11 +620,26 @@ def main() -> None:
     print(f"Shard: {args.shard_index}/{args.num_shards}", flush=True)
     print(f"Manifest dir: {args.manifest_dir}", flush=True)
     print(f"Cleanup local video: {not args.keep_local_video}", flush=True)
-    pipeline_status = args.output_root / "participant_pipeline_status.csv"
+    pipeline_status = pipeline_status_path(args.output_root, args.num_shards, args.shard_index)
+    print(f"Status CSV: {pipeline_status}", flush=True)
     failures: list[str] = []
+    run_started = time.monotonic()
+    processed = 0
     try:
         for participant, manifest in manifests:
+            print(
+                "\n"
+                + progress_line(
+                    processed,
+                    len(manifests),
+                    time.monotonic() - run_started,
+                    prefix=f"Participant shard {args.shard_index}",
+                )
+                + f" | next={participant}",
+                flush=True,
+            )
             started_at = utc_now()
+            participant_started = time.monotonic()
             upsert_pipeline_status(
                 pipeline_status,
                 {
@@ -621,6 +648,7 @@ def main() -> None:
                     "status": "running",
                     "started_at": started_at,
                     "finished_at": "",
+                    "elapsed_sec": "",
                     "manifest": str(manifest),
                     "error": "",
                 },
@@ -636,6 +664,7 @@ def main() -> None:
                         "status": "error",
                         "started_at": started_at,
                         "finished_at": utc_now(),
+                        "elapsed_sec": f"{time.monotonic() - participant_started:.3f}",
                         "manifest": str(manifest),
                         "error": repr(exc),
                     },
@@ -644,6 +673,11 @@ def main() -> None:
                     raise
                 failures.append(participant)
                 print(f"{participant} FAILED; continuing: {exc!r}", flush=True)
+                processed += 1
+                print(
+                    f"{participant} elapsed={format_duration(time.monotonic() - participant_started)}",
+                    flush=True,
+                )
                 continue
             upsert_pipeline_status(
                 pipeline_status,
@@ -653,9 +687,15 @@ def main() -> None:
                     "status": "ok",
                     "started_at": started_at,
                     "finished_at": utc_now(),
+                    "elapsed_sec": f"{time.monotonic() - participant_started:.3f}",
                     "manifest": str(manifest),
                     "error": "",
                 },
+            )
+            processed += 1
+            print(
+                f"{participant} elapsed={format_duration(time.monotonic() - participant_started)}",
+                flush=True,
             )
     finally:
         if http_process is not None:
@@ -672,7 +712,19 @@ def main() -> None:
             "Participant extraction failures after queue completion: "
             + ", ".join(failures)
         )
-    print("All selected participants completed.", flush=True)
+    print(
+        progress_line(
+            processed,
+            len(manifests),
+            time.monotonic() - run_started,
+            prefix=f"Participant shard {args.shard_index}",
+        ),
+        flush=True,
+    )
+    print(
+        f"All selected participants completed in {format_duration(time.monotonic() - run_started)}.",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

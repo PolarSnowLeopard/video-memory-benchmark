@@ -13,8 +13,10 @@ from typing import Any
 
 if __package__:
     from .llm_json_cleaning import clean_chat_completion_response, extract_json_text
+    from .pipeline_progress import progress_line
 else:
     from llm_json_cleaning import clean_chat_completion_response, extract_json_text
+    from pipeline_progress import progress_line
 
 STATUS_FIELDS = [
     "updated_at",
@@ -152,11 +154,22 @@ def main() -> None:
     client = OpenAI(api_key=args.api_key, base_url=args.base_url, timeout=3600)
 
     print(f"Selected records: {len(selected)}", flush=True)
+    batch_started = time.monotonic()
     for idx, record in enumerate(selected, start=1):
         record_id = record_id_from_record(record)
         raw_path = output_dir / f"{record_id}.json"
         clean_path = output_dir / f"{record_id}.clean.json"
-        print(f"\n[{idx}/{len(selected)}] {record_id}", flush=True)
+        print(
+            "\n"
+            + progress_line(
+                idx - 1,
+                len(selected),
+                time.monotonic() - batch_started,
+                prefix="Text batch",
+            )
+            + f" | next={record_id}",
+            flush=True,
+        )
 
         if raw_path.exists() and clean_path.exists() and not args.overwrite:
             status = {
@@ -237,6 +250,16 @@ def main() -> None:
         upsert_csv(status_csv, status, STATUS_FIELDS, "record_id")
         if args.sleep_seconds:
             time.sleep(args.sleep_seconds)
+
+    print(
+        progress_line(
+            len(selected),
+            len(selected),
+            time.monotonic() - batch_started,
+            prefix="Text batch",
+        ),
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
