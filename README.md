@@ -1,6 +1,6 @@
 # Video Memory Benchmark
 
-这个仓库用于构建和评估“视频模态智能体跨会话长期记忆”benchmark。当前主线是 EPIC-KITCHENS-100 子流程：从官方视频下载、低清代理视频转码、对象存储分发，到集群侧调用视觉语言模型生成分层结构化证据 JSON。
+这个仓库用于构建和评估“视频模态智能体跨会话长期记忆”benchmark。当前主线是 EPIC-KITCHENS-100 子流程：从官方视频下载、低清代理视频转码、对象存储分发，到集群侧调用视觉语言模型生成分层结构化证据 JSON。Ego4D 已加入元信息审计和小规模 UID 试验清单生成，尚未把无可靠时间戳的多条规范视频声明为有序跨会话。
 
 当前定位：
 
@@ -42,7 +42,7 @@ data/
   tmp/              临时包、签名链接、模型输出，忽略。
 
 docs/
-  流水线文档、运行说明和设计记录。
+  流水线文档、运行说明和设计记录，包括 Ego4D 接入说明。
 
 prompts/
   VLM 抽取和分层聚合提示词。
@@ -146,9 +146,22 @@ http://yufanwenshu.cn:8000/epic_kitchens_100/p30_03_hierarchical_viewer.html
 
 该页面内嵌了提取出的 JSON，并通过 COS 签名 URL 播放代理视频。不要把带签名视频链接的 HTML 提交到 GitHub；对外分享还需要遵守 EPIC-KITCHENS 数据许可。
 
+### 5. 审计 Ego4D 元信息
+
+取得 Ego4D 许可并通过官方工具拿到 `ego4d.json` 后，可以先在不下载视频的情况下生成参与者、场景、音频、脱敏和时间顺序审计：
+
+```bash
+$PY scripts/analyze_ego4d_metadata.py \
+  --metadata-json /path/to/ego4d.json \
+  --output-dir data/processed/ego4d
+```
+
+脚本同时生成 `pilot_video_uids.txt`，供官方工具按 UID 下载少量 `video_540ss` 视频。完整边界和命令见 [docs/ego4d_pipeline.md](docs/ego4d_pipeline.md)。自动清单不包含跨视频时间顺序；没有额外可核验时间信息时，只能用于无序一致性试验，不能用于有方向的状态演进问题。
+
 ## 核心脚本
 
 - `scripts/analyze_epic_kitchens_100.py`：统计 EPIC-KITCHENS-100 元信息。
+- `scripts/analyze_ego4d_metadata.py`：审计 Ego4D 顶层元信息并生成不带虚假时间顺序的试验 UID 清单。
 - `scripts/build_epic_batch_manifest.py`：按参与者或视频编号生成批处理 manifest。
 - `scripts/run_epic_vpn_batch.py`：下载原始视频、转码代理视频、上传 COS、写状态表。
 - `scripts/run_epic_vpn_participant_queue.py`：按参与者并行跑下载、转码、上传队列。
@@ -192,6 +205,7 @@ http://yufanwenshu.cn:8000/epic_kitchens_100/p30_03_hierarchical_viewer.html
 - 与 EPIC 官方动作标注的初步对齐分析；
 - P30 全量分层试跑：25 个原始视频、594 个 30 秒 micro-clip、156 个 120 秒 window、25 个完整 session；
 - P30_03 HTML 分层证据查看器。
+- Ego4D `ego4d.json` 元信息规范化、顺序门禁和 `video_540ss` 试验 UID 清单生成。
 
 截至当前批处理进度，`vpn` 上已有 13 个参与者的 `540p16` 代理视频全部处理完成并上传 COS，合计 415 个视频。该状态来自运行时记录，不作为代码层面的固定假设。
 
