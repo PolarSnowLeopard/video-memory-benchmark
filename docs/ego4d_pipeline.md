@@ -1,12 +1,13 @@
 # Ego4D 接入流程
 
-本文档定义 Ego4D 接入本仓库的第一阶段：先审计 `ego4d.json`，再按 `video_uid` 下载小规模 `video_540ss` 试验集。当前阶段不下载全量视频，也不把缺失的跨视频时间顺序补成推测值。
+本文档定义 Ego4D 通用数据的生产流程：先审计 `ego4d.json`，为同一参与者的规范视频分配可复现的
+基准会话顺序，再以有界队列下载 `video_540ss`、转码上传并运行分层证据抽取。
 
 本 benchmark 的目标是通用第一人称长期视频记忆，不限定为烹饪。当前的
 `Cooking + audio` 15 视频集合只是工程回归集：它用于和 EPIC-KITCHENS 对照，验证下载、转码、
 切片、分层抽取和质检链路，不是最终数据范围的缩小版。根据本地 Ego4D 2.1 元信息，去掉过短、
 过长、高脱敏影响且不具备同参与者多视频条件的记录后，通用候选池为 6,389 个视频、517 个参与者。
-后续应从这个池中做场景覆盖和同参与者多会话选择，而不是扩展为全部烹饪视频。
+正式生产直接处理这个通用候选池中去除并发视角重复后的全部视频，而不是扩展为全部烹饪视频。
 
 官方参考：
 
@@ -31,15 +32,19 @@ Ego4D 可以复用现有的 `30 秒局部证据 -> 120 秒窗口 -> 完整视频
 | 音频 | `video_metadata.audio_duration_sec` | 可统计覆盖率 |
 | 脱敏影响 | `redacted_intervals` | 可统计区间并集 |
 | 同时拍摄关系 | `concurrent_video_sets` | 表示并发，不表示先后 |
-| 多条规范视频的现实时间顺序 | 无标准字段 | 未知，禁止推断 |
+| 多条规范视频的现实拍摄顺序 | 无标准字段 | 未知 |
+| benchmark 会话顺序 | `benchmark_session_order` | 由清单确定，可复现 |
 
-`origin_video_id` 是采集单位自行分配的编号，跨采集单位没有统一格式。`video_uid`、对象存储路径、文件名字典序和不同视频中的 `component_idx` 都不能作为跨视频时间顺序。
+`origin_video_id` 是采集单位自行分配的编号，跨采集单位没有统一格式。`video_uid`、对象存储路径、
+文件名字典序和不同视频中的 `component_idx` 都不能推断现实拍摄顺序；本项目仅使用稳定 UID 排序来定义
+独立的 benchmark 呈现顺序。
 
-因此，未经额外时间证据时：
+因此需要区分两种时间：
 
 - 同一规范视频内部可以做事件、状态变化和长视频记忆标注；
-- 同一参与者的多条视频可以做无序一致性、身份关联和检索类候选构造；
-- 不能做“第几天”“后来”“从会话 A 演进到会话 B”一类有方向的跨会话问题；
+- 同一参与者的多条视频按照 `benchmark_session_order` 依次呈现，这个顺序就是评测环境中的会话时间轴；
+- 可以沿该时间轴构造“此前会话”“后续会话”和状态演进问题；
+- 论文和数据卡必须把它称为**基准指定的呈现顺序**，不能声称它还原了真实拍摄日期；
 - 把一条长视频固定切成多段，只是模拟会话边界，不能声称是现实中的多次打开和关闭智能体。
 
 ## 1. 取得访问权限
@@ -108,7 +113,7 @@ python3 scripts/analyze_ego4d_metadata.py \
   --output-dir data/processed/ego4d
 ```
 
-默认试验候选条件：
+默认通用生产候选条件：
 
 - 单条规范视频时长在 5 分钟到 2 小时之间；
 - 脱敏比例不超过 20%；
@@ -116,10 +121,12 @@ python3 scripts/analyze_ego4d_metadata.py \
 - 同一参与者至少有 3 条通过单视频条件、且去除并发视角重复后仍独立的视频；
 - 不强制要求音频；
 - 不限制场景；
-- 最终自动选择最多 5 个参与者、每人 3 条视频。
+- `benchmark_manifest.csv` 收录所有通过条件且去除并发视角重复的视频；
+- 每位参与者内部按稳定的 `video_uid` 顺序分配 `benchmark_session_order=1..N`；
+- 另外自动选择最多 5 个参与者、每人 3 条视频作为工程回归集。
 - 同一参与者在同一个有效并发拍摄集合中的多个视频最多选择一条。
 
-这些阈值只用于低成本试验选样，不是最终 benchmark 采样标准。可以显式调整：
+这些阈值定义当前第一版通用生产集合，必须随最终数据版本一起记录。可以显式调整：
 
 ```bash
 python3 scripts/analyze_ego4d_metadata.py \
@@ -147,8 +154,12 @@ python3 scripts/analyze_ego4d_metadata.py \
 | `video_summary.csv` | 每条规范视频的统一元信息 |
 | `participant_summary.csv` | 按已知参与者或独立未知视频分组的统计 |
 | `scenario_summary.csv` | 场景对应的视频数、参与者数、时长和音频覆盖 |
-| `temporal_order_audit.csv` | 跨视频顺序与任务资格的硬门禁 |
+| `temporal_order_audit.csv` | 现实拍摄顺序可用性的审计记录 |
 | `candidate_videos.csv` | 全部视频及透明排除原因 |
+| `benchmark_manifest.csv` | 去除并发视角重复后的通用全量生产清单，包含基准会话顺序 |
+| `benchmark_video_uids.txt` | 全量生产清单 UID |
+| `participant_manifests/` | VPN 队列直接消费的逐参与者清单 |
+| `participant_manifest_index.csv` | 每位参与者的视频数、时长和清单文件 |
 | `pilot_manifest.csv` | 自动选择的小规模下载试验清单 |
 | `pilot_video_uids.txt` | 可直接传给官方命令行工具的 UID 列表 |
 
@@ -161,7 +172,8 @@ head -n 20 data/processed/ego4d/temporal_order_audit.csv
 wc -l data/processed/ego4d/pilot_video_uids.txt
 ```
 
-`pilot_manifest.csv` 中的 `pilot_selection_rank` 只用于可复现选样，`pilot_selection_rank_is_temporal=false`，且 `cross_video_session_order` 始终为空。
+`cross_video_session_order` 仍为空，因为它表示未知的现实拍摄顺序；生产和评测统一使用
+`benchmark_session_order`。`pilot_manifest.csv` 保留正式清单中的基准顺序。
 
 ## 5. 只下载试验视频
 
@@ -246,6 +258,64 @@ python3 scripts/run_ego4d_vpn_batch.py \
 
 脚本可以安全续跑：只有状态为 `ok` 且 URL 清单中已有签名地址的记录才会跳过。任一步骤失败时不会清理该条记录的本地视频。正式全量处理仍应使用元信息脚本生成的有界清单分批运行，不能把全部 `video_540ss` 一次下载到本地。
 
+### 通用全量 VPN 队列
+
+15 条工程回归集通过后，不再增加新的场景烟测，直接生成通用全量清单并启动队列：
+
+```bash
+cd /home/lighthouse/video-memory-benchmark
+git pull
+source /home/lighthouse/.venvs/ego4d/bin/activate
+set -euo pipefail
+
+export EGO4D_ROOT=/home/lighthouse/video-benchmark/data/ego4d
+export EGO4D_METADATA="$(find "$EGO4D_ROOT" -name ego4d.json -type f -print -quit)"
+test -n "$EGO4D_METADATA"
+
+python3 scripts/analyze_ego4d_metadata.py \
+  --metadata-json "$EGO4D_METADATA" \
+  --output-dir data/processed/ego4d \
+  --min-duration-sec 300 \
+  --max-duration-sec 7200 \
+  --max-redaction-ratio 0.20 \
+  --min-videos-per-participant 3 \
+  --pilot-participants 5 \
+  --pilot-videos-per-participant 3
+
+python3 scripts/run_ego4d_vpn_participant_queue.py \
+  --manifest-dir data/processed/ego4d/participant_manifests \
+  --participants all \
+  --max-workers 5 \
+  --data-root /home/lighthouse/video-benchmark/data \
+  --ego4d-root /home/lighthouse/video-benchmark/data/ego4d \
+  --ego4d-video-dir /home/lighthouse/video-benchmark/data/ego4d/v2/video_540ss \
+  --aws-profile ego4d \
+  --cos-config ~/.cos.conf \
+  --cos-prefix video-benchmark/ego4d \
+  --url-expire-days 90 \
+  --ffmpeg-threads 1 \
+  --min-free-gb 20 \
+  --run-name ego4d_general_full_queue
+```
+
+默认同时删除上传成功的源视频和本地代理。5 个工作进程各自维护独立状态表和 URL 清单，不会并发写同一个
+CSV。中断后原命令重启即可；队列会跳过 URL 数量已经完整的参与者，子任务会跳过已完成视频。
+
+监控命令：
+
+```bash
+python3 - <<'PY'
+import csv
+from collections import Counter
+
+p = '/home/lighthouse/video-benchmark/data/processed/ego4d_pipeline_runs/ego4d_general_full_queue_status.csv'
+rows = list(csv.DictReader(open(p, newline='', encoding='utf-8')))
+print('participants:', len(rows))
+print('status:', Counter(row['status'] for row in rows))
+print('videos:', sum(int(row['uploaded_videos'] or 0) for row in rows), '/', sum(int(row['selected_videos'] or 0) for row in rows))
+PY
+```
+
 ## 7. 接入现有分层抽取
 
 下载试验视频后的适配边界是：
@@ -261,8 +331,8 @@ Ego4D video_540ss
 
 现有的切片、视频调用、文本聚合、结构校验和百炼质检框架可以继续使用。
 标准代理清单保留 `video_uid` 作为 `video_id`，并保留规范化参与者编号。生产提示词使用通用地点、
-人物、物体、文档、设备、车辆、工具、任务和状态枚举；烹饪动作只是其中一类。正式扩展时仍需按场景分层
-抽样，检查动作、实体和状态枚举的覆盖率。
+人物、物体、文档、设备、车辆、工具、任务和状态枚举；烹饪动作只是其中一类。全量处理后按场景统计
+抽取覆盖率，用于数据分析和后续 benchmark 题目采样，不再把视频证据抽取限定为某些场景。
 
 集群侧切成 30 秒片段时必须精确重编码，不能直接码流拷贝：
 
@@ -431,12 +501,81 @@ PY
 两次层间构建都会移除上游模型自报的 `confidence` 和 `trackability`，避免未校准的“全部高置信”
 向上层传播。画面证据、不确定性和结构校验摘要仍会保留。
 
-## 9. 跨会话演进的放行条件
+### 通用全量集群抽取
 
-如果后续获得可靠的额外时间信息，必须单独保存带来源的顺序表，至少包含：
+VPN 队列全部完成后，把逐参与者代理 URL 表打成一个小包并上传 COS：
 
-```text
-participant_id,video_uid,session_order,ordering_basis,ordering_source,verified_by
+```bash
+cd /home/lighthouse/video-memory-benchmark
+set -euo pipefail
+
+STAGE=/home/lighthouse/video-benchmark/data/tmp/ego4d_general_full_proxy_manifests
+BUNDLE=/home/lighthouse/video-benchmark/data/tmp/ego4d_general_full_proxy_manifests.tar.gz
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+
+cp /home/lighthouse/video-benchmark/data/cos_urls/ego4d_p*_all_videos_proxy_540p16_urls.csv "$STAGE"/
+cp data/processed/ego4d/participant_manifest_index.csv "$STAGE"/
+cp data/processed/ego4d/metadata_report.json "$STAGE"/
+tar -C "$(dirname "$STAGE")" -czf "$BUNDLE" "$(basename "$STAGE")"
+
+python3 scripts/upload_epic_to_cos.py \
+  --config ~/.cos.conf \
+  --prefix video-benchmark/ego4d/cluster_inputs \
+  --url-expire-days 90 \
+  --output-csv /home/lighthouse/video-benchmark/data/cos_urls/ego4d_general_full_manifest_bundle_download.csv \
+  "$BUNDLE"
+
+python3 - <<'PY'
+import csv
+p = '/home/lighthouse/video-benchmark/data/cos_urls/ego4d_general_full_manifest_bundle_download.csv'
+print(next(csv.DictReader(open(p, newline='', encoding='utf-8')))['signed_url'])
+PY
 ```
 
-只有同一参与者的每条入选视频都具有可审计的现实时间依据时，才能把该组的 `temporal_evolution_eligible` 改为 `true`。人工观看后根据剧情“猜顺序”、按文件名排序或按 `origin_video_id` 排序都不满足这一条件。
+在两台集群上下载并解压同一个包。第一台使用 `--shard-index 0`：
+
+```bash
+cd /workspace/video-memory-benchmark
+git pull
+mkdir -p data/cluster_inputs
+
+curl -L --retry 5 --retry-delay 3 \
+  -o data/cluster_inputs/ego4d_general_full_proxy_manifests.tar.gz \
+  "$EGO4D_MANIFEST_BUNDLE_URL"
+
+tar -C data/cluster_inputs -xzf data/cluster_inputs/ego4d_general_full_proxy_manifests.tar.gz
+
+python3 scripts/run_hierarchical_extraction_participants.py \
+  --manifest-dir data/cluster_inputs/ego4d_general_full_proxy_manifests \
+  --participants all \
+  --num-shards 2 \
+  --shard-index 0 \
+  --data-root data/ego4d_general_full_shard0 \
+  --output-root outputs/ego4d/general_full_shard0 \
+  --base-url http://127.0.0.1:8000/v1 \
+  --model qwen35-a3b \
+  --attempts 3 \
+  --continue-on-participant-error
+```
+
+第二台命令仅把 `--shard-index`、`--data-root` 和 `--output-root` 中的 `0` 改为 `1`。
+只有一台集群时使用 `--num-shards 1 --shard-index 0`。编排器按参与者持续执行，失败参与者写入
+`participant_pipeline_status.csv` 后继续；整条队列结束时如仍有失败会返回非零状态。再次运行同一命令
+只补缺失结果。
+
+这里不再增加人工场景烟测或第二轮试点，但每层的 JSON 解析、结构门禁、时间边界校验和失败重试仍属于
+生产流水线，不能关闭；它们负责防止残缺输出静默进入后续证据链。
+
+## 9. 跨会话时间语义
+
+正式清单必须保存下面这些字段：
+
+```text
+participant_id,video_uid,benchmark_session_order,benchmark_order_status,benchmark_order_basis
+```
+
+`benchmark_session_order` 是智能体实际接收会话的顺序，因此可以据此评测有方向的跨会话记忆。
+`benchmark_order_basis=deterministic_video_uid_order` 表示顺序由数据构建流程确定。原始元信息中的
+`cross_video_order_status=unknown` 和 `temporal_evolution_eligible=false` 继续保留，用于提醒使用者：
+该顺序不是 Ego4D 的现实拍摄 chronology，不能用于关于参与者真实生活变化的结论。

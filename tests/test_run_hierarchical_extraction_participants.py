@@ -1,4 +1,5 @@
 import json
+import csv
 import threading
 import sys
 import tempfile
@@ -17,6 +18,8 @@ from scripts.run_hierarchical_extraction_participants import (  # noqa: E402
     http_server_serves_directory,
     require_validation_complete,
     run_until_clean,
+    select_manifest_shard,
+    upsert_pipeline_status,
 )
 
 
@@ -63,6 +66,29 @@ class HierarchicalExtractionParticipantTests(unittest.TestCase):
 
         self.assertEqual([participant for participant, _ in found], ["P02", "P30"])
 
+    def test_discovers_ego4d_manifests_from_csv_participant(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "ego4d_p000010_all_videos_proxy_540p16_urls.csv").write_text(
+                "participant_id,video_id\nEGO4D_P000010,uid-a\n",
+                encoding="utf-8",
+            )
+            (root / "ego4d_p000002_all_videos_proxy_540p16_urls.csv").write_text(
+                "participant_id,video_id\nEGO4D_P000002,uid-b\n",
+                encoding="utf-8",
+            )
+
+            found = discover_participant_manifests(root, "all")
+
+        self.assertEqual(
+            [participant for participant, _ in found],
+            ["EGO4D_P000002", "EGO4D_P000010"],
+        )
+        self.assertEqual(
+            [participant for participant, _ in select_manifest_shard(found, 2, 1)],
+            ["EGO4D_P000010"],
+        )
+
     def test_retries_batch_until_expected_clean_outputs_exist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
@@ -83,6 +109,26 @@ class HierarchicalExtractionParticipantTests(unittest.TestCase):
             )
 
         self.assertEqual(len(calls), 2)
+
+    def test_pipeline_status_upsert_replaces_participant_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "status.csv"
+            base = {
+                "updated_at": "now",
+                "participant_id": "EGO4D_P000001",
+                "started_at": "start",
+                "finished_at": "",
+                "manifest": "manifest.csv",
+                "error": "",
+            }
+            upsert_pipeline_status(path, {**base, "status": "running"})
+            upsert_pipeline_status(path, {**base, "status": "ok", "finished_at": "end"})
+
+            with path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "ok")
 
     def test_retry_targets_only_missing_records_and_raises_token_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

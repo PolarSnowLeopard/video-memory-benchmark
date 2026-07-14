@@ -53,6 +53,10 @@ URL_FIELDS = [
     "cross_video_order_status",
     "cross_video_order_basis",
     "temporal_evolution_eligible",
+    "benchmark_session_order",
+    "benchmark_order_status",
+    "benchmark_order_basis",
+    "benchmark_temporal_evolution_eligible",
     "local_path",
     "bucket",
     "region",
@@ -558,6 +562,12 @@ def process_one(
             "cross_video_order_basis": row.get("cross_video_order_basis", ""),
             "temporal_evolution_eligible": row.get(
                 "temporal_evolution_eligible", ""
+            ),
+            "benchmark_session_order": row.get("benchmark_session_order", ""),
+            "benchmark_order_status": row.get("benchmark_order_status", ""),
+            "benchmark_order_basis": row.get("benchmark_order_basis", ""),
+            "benchmark_temporal_evolution_eligible": row.get(
+                "benchmark_temporal_evolution_eligible", ""
             ),
             "local_path": str(proxy_path),
             "bucket": cos["bucket"],

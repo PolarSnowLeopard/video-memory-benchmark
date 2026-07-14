@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Audit Ego4D metadata and build an explicitly unordered pilot manifest.
+"""Audit Ego4D metadata and build reproducible benchmark manifests.
 
 The public ``ego4d.json`` metadata identifies canonical videos and wearers, but
 does not provide a standardized capture timestamp that can order different
-canonical videos. This script preserves that limitation as machine-readable
-eligibility fields instead of inferring order from IDs or paths.
+canonical videos. Real capture chronology therefore remains unknown. For the
+benchmark, this script separately assigns a deterministic presentation order;
+that order defines the synthetic cross-session timeline seen by evaluated
+agents and must not be described as the original recording chronology.
 
 Only the Python standard library is required.
 """
@@ -151,6 +153,10 @@ CANDIDATE_FIELDS = [
 
 
 PILOT_FIELDS = CANDIDATE_FIELDS + [
+    "benchmark_session_order",
+    "benchmark_order_status",
+    "benchmark_order_basis",
+    "benchmark_temporal_evolution_eligible",
     "pilot_selection_rank",
     "participant_selection_rank",
     "participant_video_selection_rank",
@@ -158,9 +164,30 @@ PILOT_FIELDS = CANDIDATE_FIELDS + [
 ]
 
 
+BENCHMARK_ORDER_FIELDS = [
+    "benchmark_session_order",
+    "benchmark_order_status",
+    "benchmark_order_basis",
+    "benchmark_temporal_evolution_eligible",
+]
+
+
+BENCHMARK_FIELDS = CANDIDATE_FIELDS + BENCHMARK_ORDER_FIELDS
+
+
+PARTICIPANT_MANIFEST_INDEX_FIELDS = [
+    "participant_id",
+    "manifest_file",
+    "video_count",
+    "total_duration_sec",
+    "first_benchmark_session_order",
+    "last_benchmark_session_order",
+]
+
+
 @dataclass(frozen=True)
 class CandidateFilters:
-    """Transparent filters for a small metadata-only consistency pilot."""
+    """Transparent filters for the production candidate pool."""
 
     min_duration_sec: float = 300.0
     max_duration_sec: float = 7200.0
@@ -564,6 +591,14 @@ def _deduplicate_concurrent_rows(
     return selected
 
 
+def benchmark_manifest_slug(participant_id: str) -> str:
+    """Return the filename component shared by vpn and cluster manifests."""
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", participant_id).strip("_.-").lower()
+    if not slug:
+        raise ValueError(f"Cannot build manifest filename for participant {participant_id!r}")
+    return slug
+
+
 def build_candidate_rows(
     video_rows: Sequence[dict[str, object]],
     participant_rows: Sequence[dict[str, object]],
@@ -651,24 +686,56 @@ def build_candidate_rows(
     return candidates
 
 
-def select_pilot_rows(
+def select_benchmark_rows(
     candidate_rows: Sequence[dict[str, object]],
-    participant_limit: int,
-    videos_per_participant: int,
 ) -> list[dict[str, object]]:
-    """Select a deterministic pilot without assigning temporal semantics to rank."""
-    if participant_limit <= 0 or videos_per_participant <= 0:
-        return []
+    """Select all eligible independent videos and assign benchmark time order.
 
+    The ordering is intentionally synthetic. UUID lexical order is used only
+    because it is stable and reproducible; it is not evidence of capture time.
+    """
     groups: dict[str, list[dict[str, object]]] = defaultdict(list)
     for row in candidate_rows:
         if row["candidate_status"] == "eligible":
             groups[str(row["participant_id"])].append(row)
 
-    selectable_by_participant = {
-        participant_id: _deduplicate_concurrent_rows(rows)
-        for participant_id, rows in groups.items()
-    }
+    benchmark: list[dict[str, object]] = []
+    for participant_id in sorted(groups, key=str.casefold):
+        selected = _deduplicate_concurrent_rows(groups[participant_id])
+        temporal_eligible = len(selected) >= 2
+        for order, candidate in enumerate(selected, start=1):
+            row = dict(candidate)
+            row.update(
+                {
+                    "benchmark_session_order": order,
+                    "benchmark_order_status": "assigned",
+                    "benchmark_order_basis": "deterministic_video_uid_order",
+                    "benchmark_temporal_evolution_eligible": temporal_eligible,
+                }
+            )
+            benchmark.append(row)
+    return benchmark
+
+
+def select_pilot_rows(
+    candidate_rows: Sequence[dict[str, object]],
+    participant_limit: int,
+    videos_per_participant: int,
+) -> list[dict[str, object]]:
+    """Select a deterministic subset while preserving benchmark session order."""
+    if participant_limit <= 0 or videos_per_participant <= 0:
+        return []
+
+    groups: dict[str, list[dict[str, object]]] = defaultdict(list)
+    benchmark_rows = (
+        list(candidate_rows)
+        if all("benchmark_session_order" in row for row in candidate_rows)
+        else select_benchmark_rows(candidate_rows)
+    )
+    for row in benchmark_rows:
+        groups[str(row["participant_id"])].append(row)
+
+    selectable_by_participant = groups
     ranked_participants = sorted(
         selectable_by_participant,
         key=lambda participant_id: (
@@ -683,8 +750,10 @@ def select_pilot_rows(
 
     pilot: list[dict[str, object]] = []
     for participant_rank, participant_id in enumerate(ranked_participants, start=1):
-        # UID order is only a reproducible selection order. It is never a session order.
-        selected = selectable_by_participant[participant_id][:videos_per_participant]
+        selected = sorted(
+            selectable_by_participant[participant_id],
+            key=lambda row: int(row["benchmark_session_order"]),
+        )[:videos_per_participant]
         for video_rank, candidate in enumerate(selected, start=1):
             row = dict(candidate)
             row.update(
@@ -776,8 +845,9 @@ def analyze_metadata(
     scenario_rows = build_scenario_summaries(video_rows, participant_rows)
     temporal_audit = build_temporal_order_audit(participant_rows)
     candidate_rows = build_candidate_rows(video_rows, participant_rows, filters)
+    benchmark_rows = select_benchmark_rows(candidate_rows)
     pilot_rows = select_pilot_rows(
-        candidate_rows,
+        benchmark_rows,
         participant_limit=pilot_participants,
         videos_per_participant=pilot_videos_per_participant,
     )
@@ -788,6 +858,42 @@ def analyze_metadata(
     write_csv(output_dir / "scenario_summary.csv", scenario_rows, SCENARIO_FIELDS)
     write_csv(output_dir / "temporal_order_audit.csv", temporal_audit, TEMPORAL_AUDIT_FIELDS)
     write_csv(output_dir / "candidate_videos.csv", candidate_rows, CANDIDATE_FIELDS)
+    write_csv(output_dir / "benchmark_manifest.csv", benchmark_rows, BENCHMARK_FIELDS)
+    (output_dir / "benchmark_video_uids.txt").write_text(
+        "".join(f"{row['video_uid']}\n" for row in benchmark_rows),
+        encoding="utf-8",
+    )
+
+    participant_manifest_dir = output_dir / "participant_manifests"
+    participant_manifest_dir.mkdir(parents=True, exist_ok=True)
+    for stale in participant_manifest_dir.glob("*_all_videos.csv"):
+        stale.unlink()
+    benchmark_by_participant: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for row in benchmark_rows:
+        benchmark_by_participant[str(row["participant_id"])].append(row)
+    participant_manifest_index: list[dict[str, object]] = []
+    for participant_id in sorted(benchmark_by_participant, key=str.casefold):
+        rows = sorted(
+            benchmark_by_participant[participant_id],
+            key=lambda row: int(row["benchmark_session_order"]),
+        )
+        manifest_name = f"{benchmark_manifest_slug(participant_id)}_all_videos.csv"
+        write_csv(participant_manifest_dir / manifest_name, rows, BENCHMARK_FIELDS)
+        participant_manifest_index.append(
+            {
+                "participant_id": participant_id,
+                "manifest_file": manifest_name,
+                "video_count": len(rows),
+                "total_duration_sec": sum(float(row["duration_sec"]) for row in rows),
+                "first_benchmark_session_order": rows[0]["benchmark_session_order"],
+                "last_benchmark_session_order": rows[-1]["benchmark_session_order"],
+            }
+        )
+    write_csv(
+        output_dir / "participant_manifest_index.csv",
+        participant_manifest_index,
+        PARTICIPANT_MANIFEST_INDEX_FIELDS,
+    )
     write_csv(output_dir / "pilot_manifest.csv", pilot_rows, PILOT_FIELDS)
     (output_dir / "pilot_video_uids.txt").write_text(
         "".join(f"{row['video_uid']}\n" for row in pilot_rows),
@@ -831,6 +937,10 @@ def analyze_metadata(
         "eligible_candidate_participant_count": len(
             {str(row["participant_id"]) for row in eligible_candidates}
         ),
+        "benchmark_video_count": len(benchmark_rows),
+        "benchmark_participant_count": len(benchmark_by_participant),
+        "benchmark_total_duration_sec": sum(float(row["duration_sec"]) for row in benchmark_rows),
+        "benchmark_total_duration_hours": sum(float(row["duration_sec"]) for row in benchmark_rows) / 3600.0,
         "pilot_participant_limit": pilot_participants,
         "pilot_videos_per_participant": pilot_videos_per_participant,
         "pilot_participant_count": len({str(row["participant_id"]) for row in pilot_rows}),
@@ -842,6 +952,9 @@ def analyze_metadata(
             "infer_order_from_video_uid": False,
             "infer_order_from_origin_video_id": False,
             "infer_order_from_s3_path": False,
+            "benchmark_presentation_order": "deterministic_video_uid_order",
+            "benchmark_order_is_capture_chronology": False,
+            "benchmark_order_defines_evaluation_timeline": True,
             "pilot_selection_rank_is_temporal": False,
         },
         "outputs": [
@@ -850,6 +963,10 @@ def analyze_metadata(
             "scenario_summary.csv",
             "temporal_order_audit.csv",
             "candidate_videos.csv",
+            "benchmark_manifest.csv",
+            "benchmark_video_uids.txt",
+            "participant_manifest_index.csv",
+            "participant_manifests/",
             "pilot_manifest.csv",
             "pilot_video_uids.txt",
             "metadata_report.json",
@@ -864,7 +981,7 @@ def analyze_metadata(
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Audit Ego4D ego4d.json metadata and build a safe pilot UID manifest."
+        description="Audit Ego4D metadata and build full benchmark plus pilot manifests."
     )
     parser.add_argument("--metadata-json", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
@@ -910,8 +1027,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"Videos: {report['video_count']}")
     print(f"Known participants: {report['known_participant_count']}")
     print(f"Eligible candidate videos: {report['eligible_candidate_video_count']}")
+    print(
+        "Benchmark after concurrent-view deduplication: "
+        f"{report['benchmark_video_count']} videos / {report['benchmark_participant_count']} participants"
+    )
     print(f"Pilot videos: {report['pilot_video_count']}")
-    print(f"Cross-video temporal evolution eligible participants: 0")
+    print("Real capture chronology remains unknown; benchmark presentation order is assigned.")
     print(f"Wrote metadata audit -> {args.output_dir}")
 
 

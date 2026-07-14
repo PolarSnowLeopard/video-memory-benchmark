@@ -73,6 +73,23 @@ def participant_id(row: dict[str, Any], source_id: str) -> str:
     return str(row.get("participant_id") or source_id.split("_", 1)[0])
 
 
+def benchmark_order_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    raw_order = row.get("benchmark_session_order")
+    if raw_order is None or str(raw_order).strip() == "":
+        return {}
+    raw_eligible = row.get("benchmark_temporal_evolution_eligible")
+    return {
+        "benchmark_session_order": int(raw_order),
+        "benchmark_order_status": str(row.get("benchmark_order_status") or ""),
+        "benchmark_order_basis": str(row.get("benchmark_order_basis") or ""),
+        "benchmark_temporal_evolution_eligible": (
+            raw_eligible
+            if isinstance(raw_eligible, bool)
+            else str(raw_eligible).strip().casefold() == "true"
+        ),
+    }
+
+
 def micro_clip_id(row: dict[str, str]) -> str:
     return row.get("session_id") or row.get("record_id") or row.get("clip_id") or ""
 
@@ -114,6 +131,7 @@ def build_window_records(
                 "clip_id": clip_id,
                 "participant_id": participant_id(row, source_id),
                 "source_video_id": source_id,
+                **benchmark_order_metadata(row),
                 "start_sec": start_sec,
                 "end_sec": end_sec,
                 "duration_sec": end_sec - start_sec,
@@ -134,6 +152,7 @@ def build_window_records(
                 "window_id": record_id,
                 "participant_id": participant,
                 "source_video_id": source_id,
+                **benchmark_order_metadata(clips[0]),
                 "window_index": window_index,
                 "start_sec": start_sec,
                 "end_sec": end_sec,
@@ -178,6 +197,7 @@ def build_session_records(
                 "window_id": record_id,
                 "participant_id": participant_id(record, source_id),
                 "source_video_id": source_id,
+                **benchmark_order_metadata(record),
                 "window_index": int(record.get("window_index") or 0),
                 "start_sec": float(record.get("start_sec") or 0),
                 "end_sec": float(record.get("end_sec") or 0),
@@ -198,6 +218,7 @@ def build_session_records(
                 "session_id": source_id,
                 "participant_id": participant,
                 "source_video_id": source_id,
+                **benchmark_order_metadata(windows[0]),
                 "start_sec": start_sec,
                 "end_sec": end_sec,
                 "duration_sec": end_sec - start_sec,

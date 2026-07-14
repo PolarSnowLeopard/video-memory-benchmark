@@ -7,6 +7,7 @@ from scripts.run_epic_vpn_session_batch import (
     DEFAULT_CUT_MODE,
     DEFAULT_MAX_DURATION_ERROR_SEC,
     DEFAULT_REENCODE_CRF,
+    benchmark_order_metadata,
     completed_session_ids,
     parse_ffmpeg_duration,
     remove_csv_row,
@@ -19,6 +20,24 @@ class SessionBatchTests(unittest.TestCase):
         self.assertEqual(DEFAULT_CUT_MODE, "reencode")
         self.assertEqual(DEFAULT_REENCODE_CRF, 23)
         self.assertEqual(DEFAULT_MAX_DURATION_ERROR_SEC, 0.25)
+
+    def test_preserves_benchmark_order_metadata(self) -> None:
+        self.assertEqual(
+            benchmark_order_metadata(
+                {
+                    "benchmark_session_order": "3",
+                    "benchmark_order_status": "assigned",
+                    "benchmark_order_basis": "deterministic_video_uid_order",
+                    "benchmark_temporal_evolution_eligible": "true",
+                }
+            ),
+            {
+                "benchmark_session_order": "3",
+                "benchmark_order_status": "assigned",
+                "benchmark_order_basis": "deterministic_video_uid_order",
+                "benchmark_temporal_evolution_eligible": "true",
+            },
+        )
 
     def test_parse_ffmpeg_duration(self) -> None:
         output = "Duration: 01:02:03.45, start: 0.000000, bitrate: 1000 kb/s"

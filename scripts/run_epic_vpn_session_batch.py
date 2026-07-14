@@ -6,13 +6,11 @@ from __future__ import annotations
 import argparse
 import configparser
 import csv
-import math
 import mimetypes
 import os
 import re
 import shutil
 import subprocess
-import sys
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,6 +51,10 @@ URL_FIELDS = [
     "participant_id",
     "source_video_id",
     "video_id",
+    "benchmark_session_order",
+    "benchmark_order_status",
+    "benchmark_order_basis",
+    "benchmark_temporal_evolution_eligible",
     "session_index",
     "start_sec",
     "end_sec",
@@ -379,6 +381,17 @@ def participant_id(row: dict[str, str], video_id: str) -> str:
     return row.get("participant_id") or video_id.split("_", 1)[0]
 
 
+def benchmark_order_metadata(row: dict[str, str]) -> dict[str, str]:
+    return {
+        "benchmark_session_order": row.get("benchmark_session_order", ""),
+        "benchmark_order_status": row.get("benchmark_order_status", ""),
+        "benchmark_order_basis": row.get("benchmark_order_basis", ""),
+        "benchmark_temporal_evolution_eligible": row.get(
+            "benchmark_temporal_evolution_eligible", ""
+        ),
+    }
+
+
 def source_proxy_path(row: dict[str, str], args: argparse.Namespace) -> Path:
     video_id = source_video_id(row)
     participant = participant_id(row, video_id)
@@ -476,6 +489,7 @@ def process_session(
             "participant_id": participant,
             "source_video_id": video_id,
             "video_id": video_id,
+            **benchmark_order_metadata(row),
             "session_index": str(session_index),
             "start_sec": fmt_float(start_sec),
             "end_sec": fmt_float(end_sec),
@@ -504,6 +518,7 @@ def process_session(
             "participant_id": participant,
             "source_video_id": video_id,
             "video_id": video_id,
+            **benchmark_order_metadata(row),
             "session_index": str(session_index),
             "start_sec": fmt_float(start_sec),
             "end_sec": fmt_float(end_sec),

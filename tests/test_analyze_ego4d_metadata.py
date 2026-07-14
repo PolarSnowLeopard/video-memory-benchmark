@@ -17,6 +17,7 @@ from scripts.analyze_ego4d_metadata import (  # noqa: E402
     build_participant_summaries,
     build_temporal_order_audit,
     normalize_video,
+    select_benchmark_rows,
     select_pilot_rows,
 )
 
@@ -206,7 +207,7 @@ class Ego4DMetadataAnalysisTests(unittest.TestCase):
 
         self.assertEqual([row["video_uid"] for row in pilot], ["video-a", "video-c"])
 
-    def test_candidate_and_pilot_rows_remain_explicitly_unordered(self) -> None:
+    def test_benchmark_rows_receive_reproducible_presentation_order(self) -> None:
         rows = self.normalized_rows()
         summaries = build_participant_summaries(rows)
         candidates = build_candidate_rows(
@@ -221,7 +222,8 @@ class Ego4DMetadataAnalysisTests(unittest.TestCase):
                 scenarios=("Cooking",),
             ),
         )
-        pilot = select_pilot_rows(candidates, participant_limit=1, videos_per_participant=2)
+        benchmark = select_benchmark_rows(candidates)
+        pilot = select_pilot_rows(benchmark, participant_limit=1, videos_per_participant=2)
 
         eligible = [row for row in candidates if row["candidate_status"] == "eligible"]
         self.assertEqual([row["video_uid"] for row in eligible], ["video-a", "video-b"])
@@ -229,9 +231,13 @@ class Ego4DMetadataAnalysisTests(unittest.TestCase):
             {row["independent_eligible_video_count_for_participant"] for row in eligible},
             {2},
         )
+        self.assertEqual([row["video_uid"] for row in benchmark], ["video-a", "video-b"])
+        self.assertEqual([row["benchmark_session_order"] for row in benchmark], [1, 2])
+        self.assertTrue(all(row["cross_video_session_order"] is None for row in benchmark))
+        self.assertTrue(all(row["cross_video_order_status"] == "unknown" for row in benchmark))
+        self.assertTrue(all(row["benchmark_order_status"] == "assigned" for row in benchmark))
+        self.assertTrue(all(row["benchmark_temporal_evolution_eligible"] for row in benchmark))
         self.assertEqual([row["video_uid"] for row in pilot], ["video-a", "video-b"])
-        self.assertTrue(all(row["cross_video_session_order"] is None for row in pilot))
-        self.assertTrue(all(row["cross_video_order_status"] == "unknown" for row in pilot))
         self.assertTrue(all(not row["pilot_selection_rank_is_temporal"] for row in pilot))
 
     def test_analysis_writes_reproducible_artifacts(self) -> None:
@@ -256,6 +262,10 @@ class Ego4DMetadataAnalysisTests(unittest.TestCase):
                 "scenario_summary.csv",
                 "temporal_order_audit.csv",
                 "candidate_videos.csv",
+                "benchmark_manifest.csv",
+                "benchmark_video_uids.txt",
+                "participant_manifest_index.csv",
+                "participant_manifests",
                 "pilot_manifest.csv",
                 "pilot_video_uids.txt",
                 "metadata_report.json",
@@ -265,6 +275,8 @@ class Ego4DMetadataAnalysisTests(unittest.TestCase):
             self.assertEqual(report["known_participant_count"], 2)
             self.assertEqual(report["multi_video_known_participant_count"], 1)
             self.assertEqual(report["temporal_evolution_eligible_participant_count"], 0)
+            self.assertEqual(report["benchmark_video_count"], 2)
+            self.assertEqual(report["benchmark_participant_count"], 1)
             self.assertEqual(report["scenario_count"], 1)
             self.assertEqual(report["video_duration_sec_distribution"]["median"], 300.0)
             self.assertEqual(report["pilot_video_count"], 2)
@@ -273,12 +285,18 @@ class Ego4DMetadataAnalysisTests(unittest.TestCase):
                 pilot_rows = list(csv.DictReader(f))
             self.assertEqual([row["video_uid"] for row in pilot_rows], ["video-a", "video-b"])
             self.assertEqual({row["cross_video_session_order"] for row in pilot_rows}, {""})
+            self.assertEqual([row["benchmark_session_order"] for row in pilot_rows], ["1", "2"])
+            self.assertEqual({row["benchmark_order_status"] for row in pilot_rows}, {"assigned"})
+            self.assertEqual({row["pilot_selection_rank_is_temporal"] for row in pilot_rows}, {"false"})
             self.assertEqual(
                 (output_dir / "pilot_video_uids.txt").read_text(encoding="utf-8"),
                 "video-a\nvideo-b\n",
             )
             persisted = json.loads((output_dir / "metadata_report.json").read_text(encoding="utf-8"))
             self.assertEqual(persisted, report)
+
+            participant_manifests = list((output_dir / "participant_manifests").glob("*.csv"))
+            self.assertEqual([path.name for path in participant_manifests], ["ego4d_p000007_all_videos.csv"])
 
 
 if __name__ == "__main__":

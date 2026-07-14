@@ -32,6 +32,10 @@ class HierarchicalEvidenceInputTests(unittest.TestCase):
                     "start_sec": "0",
                     "end_sec": "30",
                     "duration_sec": "30",
+                    "benchmark_session_order": "2",
+                    "benchmark_order_status": "assigned",
+                    "benchmark_order_basis": "deterministic_video_uid_order",
+                    "benchmark_temporal_evolution_eligible": "true",
                 },
                 {
                     "session_id": "P30_01_s001",
@@ -81,6 +85,8 @@ class HierarchicalEvidenceInputTests(unittest.TestCase):
 
         self.assertEqual([record["record_id"] for record in records], ["P30_01_w000", "P30_01_w001"])
         self.assertEqual(records[0]["start_sec"], 0.0)
+        self.assertEqual(records[0]["benchmark_session_order"], 2)
+        self.assertTrue(records[0]["benchmark_temporal_evolution_eligible"])
         self.assertEqual(records[0]["end_sec"], 120.0)
         self.assertEqual(records[0]["micro_clip_ids"], ["P30_01_s000", "P30_01_s001", "P30_01_s002", "P30_01_s003"])
         self.assertEqual(records[1]["start_sec"], 120.0)
@@ -108,6 +114,10 @@ class HierarchicalEvidenceInputTests(unittest.TestCase):
                     "start_sec": 0.0,
                     "end_sec": 120.0,
                     "micro_clip_ids": ["P30_01_s000"],
+                    "benchmark_session_order": 2,
+                    "benchmark_order_status": "assigned",
+                    "benchmark_order_basis": "deterministic_video_uid_order",
+                    "benchmark_temporal_evolution_eligible": True,
                 },
                 {
                     "record_id": "P30_01_w001",
@@ -134,6 +144,8 @@ class HierarchicalEvidenceInputTests(unittest.TestCase):
         self.assertEqual(len(sessions), 1)
         session = sessions[0]
         self.assertEqual(session["record_id"], "P30_01")
+        self.assertEqual(session["benchmark_session_order"], 2)
+        self.assertTrue(session["benchmark_temporal_evolution_eligible"])
         self.assertEqual(session["start_sec"], 0.0)
         self.assertEqual(session["end_sec"], 180.0)
         self.assertEqual(session["window_ids"], ["P30_01_w000", "P30_01_w001"])
