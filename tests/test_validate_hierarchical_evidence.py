@@ -310,6 +310,52 @@ class HierarchicalEvidenceValidatorTests(unittest.TestCase):
         self.assertIn("inconsistent_object_category", codes)
         self.assertEqual(normalized["quality_summary"]["schema_status"], "passed")
 
+    def test_micro_validator_normalizes_order_state_tokens_and_cookware_category(self) -> None:
+        record = valid_micro_record()
+        record["objects"][0].update(
+            {
+                "name": "不锈钢锅",
+                "category": "container",
+                "initial_state": "closed",
+                "final_state": "open",
+            }
+        )
+        first_event = record["atomic_events"][0]
+        later_event = dict(first_event)
+        later_event.update({"event_id": "event_2", "time_range": "00:10-00:12"})
+        record["atomic_events"] = [later_event, first_event]
+        record["state_changes"][0].update({"before": "closed", "after": "open"})
+
+        normalized, issues = validate_micro_record(
+            record,
+            {
+                "session_id": "P30_01_s000",
+                "source_video_id": "P30_01",
+                "start_sec": "0",
+                "end_sec": "30",
+            },
+        )
+
+        codes = {item["code"] for item in issues}
+        self.assertIn("inconsistent_object_category", codes)
+        self.assertIn("non_chinese_state_token", codes)
+        self.assertIn("non_monotonic_time_order", codes)
+        self.assertEqual(normalized["objects"][0]["category"], "tool")
+        self.assertEqual(normalized["objects"][0]["initial_state"], "关闭")
+        self.assertEqual(normalized["objects"][0]["final_state"], "打开")
+        self.assertEqual(normalized["state_changes"][0]["before"], "关闭")
+        self.assertEqual(normalized["state_changes"][0]["after"], "打开")
+        self.assertEqual(
+            [item["event_id"] for item in normalized["atomic_events"]],
+            ["event_1", "event_2"],
+        )
+        self.assertEqual(
+            normalized["quality_summary"]["model_confidence_policy"],
+            "self_reported_unverified",
+        )
+        self.assertEqual(record["objects"][0]["category"], "container")
+        self.assertEqual(record["objects"][0]["initial_state"], "closed")
+
     def test_window_validator_reports_unknown_clip_reference(self) -> None:
         record = valid_window_record()
         record["evidence_facts"][0]["supporting_clip_ids"] = ["missing"]

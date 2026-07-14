@@ -9,6 +9,7 @@
 4. 每个结论必须保留 supporting_window_ids。
 5. 如果窗口之间存在冲突，不要强行消解，写入 contradictions_or_uncertainties。
 6. 输出必须是一个可被 json.loads 解析的 JSON 对象。
+7. 上游聚合模型自报的 `confidence` 和 `trackability` 可能已被移除，因为它们未经校准。不得把字段缺失解释为高置信；必须根据 supporting_window_ids、具体证据和不确定性保守判断本层置信度。
 
 输出 JSON 结构如下，字段名必须保持一致：
 

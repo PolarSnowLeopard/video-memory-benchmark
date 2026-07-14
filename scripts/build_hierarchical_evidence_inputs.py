@@ -16,6 +16,9 @@ from pathlib import Path
 from typing import Any
 
 
+MODEL_SELF_ASSESSMENT_FIELDS = {"confidence", "trackability"}
+
+
 def read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
@@ -47,6 +50,19 @@ def parse_list(value: str | None) -> set[str] | None:
         return None
     items = {item.strip() for item in value.split(",") if item.strip()}
     return items or None
+
+
+def without_model_self_assessment(value: Any) -> Any:
+    """Remove uncalibrated model self-assessments before the next LLM layer."""
+    if isinstance(value, dict):
+        return {
+            key: without_model_self_assessment(child)
+            for key, child in value.items()
+            if key not in MODEL_SELF_ASSESSMENT_FIELDS
+        }
+    if isinstance(value, list):
+        return [without_model_self_assessment(child) for child in value]
+    return value
 
 
 def source_video_id(row: dict[str, Any]) -> str:
@@ -131,7 +147,11 @@ def build_window_records(
                     }
                     for clip in clips
                 ],
-                "micro_evidence": [clip["evidence"] for clip in clips],
+                "upstream_model_self_assessment": "removed_unverified_fields",
+                "micro_evidence": [
+                    without_model_self_assessment(clip["evidence"])
+                    for clip in clips
+                ],
             }
         )
     return records
@@ -191,7 +211,11 @@ def build_session_records(
                     }
                     for window in windows
                 ],
-                "window_evidence": [window["evidence"] for window in windows],
+                "upstream_model_self_assessment": "removed_unverified_fields",
+                "window_evidence": [
+                    without_model_self_assessment(window["evidence"])
+                    for window in windows
+                ],
             }
         )
     return sessions

@@ -17,6 +17,38 @@ from typing import Any, Iterable
 CONFIDENCES = {"high", "medium", "low"}
 LONG_TERM_RE = re.compile(r"通常|习惯|经常|总是|长期|偏好|喜欢|always|usually|typically", re.IGNORECASE)
 RELATIVE_TIME_RE = re.compile(r"^(\d+):([0-5]\d(?:\.\d+)?)$")
+STATE_TOKEN_TRANSLATIONS = {
+    "open": "打开",
+    "opened": "打开",
+    "closed": "关闭",
+}
+STATE_TEXT_FIELDS = {
+    "initial_state",
+    "final_state",
+    "pre_state",
+    "post_state",
+    "value",
+    "before",
+    "after",
+}
+PORTABLE_COOKWARE_TERMS = (
+    "平底锅",
+    "煎锅",
+    "炒锅",
+    "不锈钢锅",
+    "金属锅",
+    "汤锅",
+    "奶锅",
+    "砂锅",
+    "锅具",
+)
+MICRO_TIME_ORDER_FIELDS = {
+    "atomic_events": "time_range",
+    "state_observations": "time",
+    "state_changes": "time_range",
+    "end_state": "evidence_time",
+    "uncertainties": "time_range",
+}
 
 REQUIRED_FIELDS = {
     "micro": [
@@ -411,17 +443,6 @@ def check_micro_semantic_warnings(
                     f"{object_id}:{name}",
                 )
             )
-        if "砧板" in name and category != "tool":
-            issues.append(
-                issue(
-                    "micro",
-                    record_id,
-                    "warning",
-                    "inconsistent_object_category",
-                    f"{object_id}:{name} category={category}",
-                )
-            )
-
     confidence_values: list[str] = []
 
     def collect_confidences(value: Any) -> None:
@@ -460,6 +481,139 @@ def check_micro_semantic_warnings(
                         f"{section}:{value}",
                     )
                 )
+
+
+def expected_micro_object_category(name: str) -> str | None:
+    if "砧板" in name:
+        return "tool"
+    if name == "锅" or any(term in name for term in PORTABLE_COOKWARE_TERMS):
+        return "tool"
+    return None
+
+
+def normalize_state_tokens(
+    original: Any,
+    normalized: Any,
+    record_id: str,
+    issues: list[dict[str, str]],
+    path: str = "$",
+) -> None:
+    if isinstance(original, dict) and isinstance(normalized, dict):
+        for key, value in original.items():
+            child_path = f"{path}.{key}"
+            if key in STATE_TEXT_FIELDS and isinstance(value, str):
+                replacement = STATE_TOKEN_TRANSLATIONS.get(value.strip().lower())
+                if replacement is not None:
+                    normalized[key] = replacement
+                    issues.append(
+                        issue(
+                            "micro",
+                            record_id,
+                            "warning",
+                            "non_chinese_state_token",
+                            f"{child_path}={value!r}; normalized to {replacement!r}",
+                        )
+                    )
+                    continue
+            if key in normalized:
+                normalize_state_tokens(value, normalized[key], record_id, issues, child_path)
+    elif isinstance(original, list) and isinstance(normalized, list):
+        for index, value in enumerate(original):
+            if index < len(normalized):
+                normalize_state_tokens(
+                    value,
+                    normalized[index],
+                    record_id,
+                    issues,
+                    f"{path}[{index}]",
+                )
+
+
+def relative_time_start(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return parse_relative_timestamp(text.split("-", 1)[0].strip())
+    except ValueError:
+        return None
+
+
+def normalize_micro_time_order(
+    record: dict[str, Any],
+    normalized: dict[str, Any],
+    issues: list[dict[str, str]],
+) -> None:
+    record_id = record_id_for("micro", record)
+    for section, field in MICRO_TIME_ORDER_FIELDS.items():
+        original_items = as_list(record.get(section))
+        normalized_items = as_list(normalized.get(section))
+        if len(original_items) < 2 or len(original_items) != len(normalized_items):
+            continue
+        starts = [relative_time_start(item.get(field)) for item in original_items]
+        if any(value is None for value in starts):
+            continue
+        order = sorted(range(len(starts)), key=lambda index: (starts[index], index))
+        if order == list(range(len(starts))):
+            continue
+        issues.append(
+            issue(
+                "micro",
+                record_id,
+                "warning",
+                "non_monotonic_time_order",
+                f"{section} is not ordered by {field}; normalized chronologically",
+            )
+        )
+        normalized[section] = [normalized_items[index] for index in order]
+
+
+def normalize_micro_semantics(
+    record: dict[str, Any],
+    normalized: dict[str, Any],
+    issues: list[dict[str, str]],
+) -> None:
+    record_id = record_id_for("micro", record)
+    original_objects = as_list(record.get("objects"))
+    normalized_objects = as_list(normalized.get("objects"))
+    for index, item in enumerate(original_objects):
+        if index >= len(normalized_objects):
+            break
+        object_id = str(item.get("object_id") or "")
+        name = str(item.get("name") or "")
+        category = str(item.get("category") or "")
+        expected = expected_micro_object_category(name)
+        if expected is not None and category != expected:
+            issues.append(
+                issue(
+                    "micro",
+                    record_id,
+                    "warning",
+                    "inconsistent_object_category",
+                    f"{object_id}:{name} category={category}; normalized to {expected}",
+                )
+            )
+            normalized_objects[index]["category"] = expected
+
+    normalize_state_tokens(record, normalized, record_id, issues)
+    normalize_micro_time_order(record, normalized, issues)
+
+
+def confidence_distribution(record: dict[str, Any]) -> dict[str, int]:
+    values: Counter[str] = Counter()
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            if "confidence" in value:
+                values[str(value["confidence"])] += 1
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(record)
+    return dict(sorted(values.items()))
 
 
 def validate_micro_record(
@@ -510,10 +664,13 @@ def validate_micro_record(
     check_micro_times(record, metadata, issues)
     check_confidences(layer, record_id, record, issues)
     check_micro_semantic_warnings(record, issues)
+    normalize_micro_semantics(record, normalized, issues)
     downgrade_reference_issues(issues)
     normalized["quality_summary"] = {
         "schema_status": "failed" if has_blocking(issues) else "passed",
         "issue_codes": sorted({item["code"] for item in issues}),
+        "model_confidence_policy": "self_reported_unverified",
+        "model_confidence_distribution": confidence_distribution(record),
     }
     return normalized, issues
 

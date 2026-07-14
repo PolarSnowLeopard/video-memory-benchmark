@@ -69,7 +69,12 @@ class HierarchicalEvidenceInputTests(unittest.TestCase):
             for row in rows:
                 write_json(
                     clean_dir / f"{row['session_id']}.clean.json",
-                    {"clip_id": row["session_id"], "facts": [row["start_sec"]]},
+                    {
+                        "clip_id": row["session_id"],
+                        "facts": [row["start_sec"]],
+                        "confidence": "high",
+                        "nested": {"trackability": "high", "evidence": "画面可见"},
+                    },
                 )
 
             records = build_window_records(rows, clean_dir, window_sec=120, allow_missing=False)
@@ -82,6 +87,13 @@ class HierarchicalEvidenceInputTests(unittest.TestCase):
         self.assertEqual(records[1]["end_sec"], 135.0)
         self.assertEqual(records[1]["micro_clip_ids"], ["P30_01_s004"])
         self.assertEqual(records[0]["micro_evidence"][0]["facts"], ["0"])
+        self.assertEqual(
+            records[0]["upstream_model_self_assessment"],
+            "removed_unverified_fields",
+        )
+        self.assertNotIn("confidence", records[0]["micro_evidence"][0])
+        self.assertNotIn("trackability", records[0]["micro_evidence"][0]["nested"])
+        self.assertEqual(records[0]["micro_evidence"][0]["nested"]["evidence"], "画面可见")
 
     def test_build_session_records_groups_clean_window_outputs_by_source_video(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -110,7 +122,11 @@ class HierarchicalEvidenceInputTests(unittest.TestCase):
             for record in window_records:
                 write_json(
                     window_dir / f"{record['record_id']}.clean.json",
-                    {"window_id": record["record_id"], "summary": record["record_id"]},
+                    {
+                        "window_id": record["record_id"],
+                        "summary": record["record_id"],
+                        "confidence": "high",
+                    },
                 )
 
             sessions = build_session_records(window_records, window_dir, allow_missing=False)
@@ -122,6 +138,11 @@ class HierarchicalEvidenceInputTests(unittest.TestCase):
         self.assertEqual(session["end_sec"], 180.0)
         self.assertEqual(session["window_ids"], ["P30_01_w000", "P30_01_w001"])
         self.assertEqual([item["summary"] for item in session["window_evidence"]], ["P30_01_w000", "P30_01_w001"])
+        self.assertEqual(
+            session["upstream_model_self_assessment"],
+            "removed_unverified_fields",
+        )
+        self.assertTrue(all("confidence" not in item for item in session["window_evidence"]))
 
 
 if __name__ == "__main__":

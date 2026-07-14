@@ -300,7 +300,132 @@ python3 scripts/qwen_video_batch.py \
 
 Ego4D 的叙述、情景记忆、手物交互等官方标注可作为独立质检信号，但不应直接复制成最终 benchmark 答案。VLM 提取仍是候选证据，最终参考证据要经过结构校验、独立视觉复核和人工抽检。
 
-## 8. 跨会话演进的放行条件
+## 8. 试点全量分层抽取
+
+跨来源分层烟测通过后，使用新输出根目录运行试点全量。不要把旧提示词生成的
+12 条复测结果或 15 条烟测结果复制到新目录。当前试点的预期规模为 345 个 30 秒片段、
+91 个 120 秒窗口和 15 个完整来源视频。
+
+首先确保本地视频服务仍在为 `data/sessions` 目录提供服务，然后运行 30 秒层：
+
+```bash
+cd /workspace/video-memory-benchmark
+git pull
+set -euo pipefail
+
+BASE_URL=http://127.0.0.1:8000/v1
+MODEL=qwen35-a3b
+SESSION_CSV=data/cos_urls/ego4d_cooking_audio_pilot_sessions_30s_urls.csv
+RUN_ROOT=outputs/ego4d/cooking_audio_pilot_v2
+MICRO_DIR=$RUN_ROOT/micro_30s
+WINDOW_DIR=$RUN_ROOT/windows_120s
+SESSION_DIR=$RUN_ROOT/sessions_full
+QC_ROOT=$RUN_ROOT/qc
+WINDOW_INPUT=$QC_ROOT/hierarchical/window_inputs_30s_120s.jsonl
+SESSION_INPUT=$QC_ROOT/hierarchical/session_inputs_30s_120s.jsonl
+
+mkdir -p "$MICRO_DIR" "$WINDOW_DIR" "$SESSION_DIR" "$QC_ROOT/hierarchical"
+
+python3 scripts/qwen_video_batch.py \
+  --base-url "$BASE_URL" \
+  --model "$MODEL" \
+  --signed-url-csv "$SESSION_CSV" \
+  --prompt-file prompts/video_micro_evidence_schema_zh.txt \
+  --output-dir "$MICRO_DIR" \
+  --fps 1 \
+  --max-tokens 8192 \
+  --temperature 0 \
+  --extra-body-json '{"chat_template_kwargs":{"enable_thinking":false}}'
+
+python3 scripts/validate_hierarchical_evidence.py micro \
+  --input-dir "$MICRO_DIR" \
+  --metadata "$SESSION_CSV" \
+  --output-dir "$QC_ROOT/validation/micro"
+
+python3 - "$QC_ROOT/validation/micro/report.json" 345 <<'PY'
+import json, sys
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+expected = int(sys.argv[2])
+actual = {key: report.get(key) for key in ("records", "accepted", "rejected")}
+print(actual)
+assert actual == {"records": expected, "accepted": expected, "rejected": 0}, actual
+PY
+```
+
+同一命令可以安全续跑：已有的 `clean.json` 会被跳过，只会重试未生成可解析结果的记录。
+微片段校验副本会规范时间顺序、已知英文状态值和便携锅具类别，原始输出保持不变。
+
+微片段全部接受后，运行 120 秒窗口层：
+
+```bash
+python3 scripts/build_hierarchical_evidence_inputs.py windows \
+  --micro-url-csv "$SESSION_CSV" \
+  --micro-output-dir "$QC_ROOT/validation/micro/accepted" \
+  --window-sec 120 \
+  --output-jsonl "$WINDOW_INPUT"
+
+python3 scripts/qwen_text_jsonl_batch.py \
+  --base-url "$BASE_URL" \
+  --model "$MODEL" \
+  --input-jsonl "$WINDOW_INPUT" \
+  --prompt-file prompts/video_window_aggregation_schema_zh.txt \
+  --output-dir "$WINDOW_DIR" \
+  --max-tokens 8192 \
+  --temperature 0 \
+  --extra-body-json '{"chat_template_kwargs":{"enable_thinking":false}}'
+
+python3 scripts/validate_hierarchical_evidence.py window \
+  --input-dir "$WINDOW_DIR" \
+  --metadata "$WINDOW_INPUT" \
+  --output-dir "$QC_ROOT/validation/window"
+
+python3 - "$QC_ROOT/validation/window/report.json" 91 <<'PY'
+import json, sys
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+expected = int(sys.argv[2])
+actual = {key: report.get(key) for key in ("records", "accepted", "rejected")}
+print(actual)
+assert actual == {"records": expected, "accepted": expected, "rejected": 0}, actual
+PY
+```
+
+窗口全部接受后，运行完整来源视频层：
+
+```bash
+python3 scripts/build_hierarchical_evidence_inputs.py sessions \
+  --window-input-jsonl "$WINDOW_INPUT" \
+  --window-output-dir "$QC_ROOT/validation/window/accepted" \
+  --output-jsonl "$SESSION_INPUT"
+
+python3 scripts/qwen_text_jsonl_batch.py \
+  --base-url "$BASE_URL" \
+  --model "$MODEL" \
+  --input-jsonl "$SESSION_INPUT" \
+  --prompt-file prompts/video_session_aggregation_schema_zh.txt \
+  --output-dir "$SESSION_DIR" \
+  --max-tokens 16384 \
+  --temperature 0 \
+  --extra-body-json '{"chat_template_kwargs":{"enable_thinking":false}}'
+
+python3 scripts/validate_hierarchical_evidence.py session \
+  --input-dir "$SESSION_DIR" \
+  --metadata "$SESSION_INPUT" \
+  --output-dir "$QC_ROOT/validation/session"
+
+python3 - "$QC_ROOT/validation/session/report.json" 15 <<'PY'
+import json, sys
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+expected = int(sys.argv[2])
+actual = {key: report.get(key) for key in ("records", "accepted", "rejected")}
+print(actual)
+assert actual == {"records": expected, "accepted": expected, "rejected": 0}, actual
+PY
+```
+
+两次层间构建都会移除上游模型自报的 `confidence` 和 `trackability`，避免未校准的“全部高置信”
+向上层传播。画面证据、不确定性和结构校验摘要仍会保留。
+
+## 9. 跨会话演进的放行条件
 
 如果后续获得可靠的额外时间信息，必须单独保存带来源的顺序表，至少包含：
 
