@@ -279,8 +279,8 @@ python3 scripts/analyze_ego4d_metadata.py \
   --max-duration-sec 7200 \
   --max-redaction-ratio 0.20 \
   --min-videos-per-participant 3 \
-  --pilot-participants 5 \
-  --pilot-videos-per-participant 3
+  --pilot-participants 0 \
+  --pilot-videos-per-participant 0
 
 python3 scripts/run_ego4d_vpn_participant_queue.py \
   --manifest-dir data/processed/ego4d/participant_manifests \
