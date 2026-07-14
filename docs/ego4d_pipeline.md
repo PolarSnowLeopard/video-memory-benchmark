@@ -61,7 +61,7 @@ aws configure --profile ego4d
 官方命令行工具要求指定一个数据项。先选择体积远小于视频的 `annotations`，同时获取顶层 `ego4d.json`：
 
 ```bash
-export EGO4D_ROOT=/home/lighthouse/video-benchmark/ego4d
+export EGO4D_ROOT=/home/lighthouse/video-benchmark/data/ego4d
 
 ego4d \
   --output_directory "$EGO4D_ROOT" \
@@ -75,7 +75,7 @@ ego4d \
 按官方当前目录约定，元信息通常位于：
 
 ```text
-/home/lighthouse/video-benchmark/ego4d/v2/ego4d.json
+/home/lighthouse/video-benchmark/data/ego4d/v2/ego4d.json
 ```
 
 如安装版本的目录略有差异，用下面的命令确认：
@@ -95,7 +95,7 @@ cd /home/lighthouse/video-memory-benchmark
 git pull
 
 python3 scripts/analyze_ego4d_metadata.py \
-  --metadata-json /home/lighthouse/video-benchmark/ego4d/v2/ego4d.json \
+  --metadata-json /home/lighthouse/video-benchmark/data/ego4d/v2/ego4d.json \
   --output-dir data/processed/ego4d
 ```
 
@@ -114,7 +114,7 @@ python3 scripts/analyze_ego4d_metadata.py \
 
 ```bash
 python3 scripts/analyze_ego4d_metadata.py \
-  --metadata-json /home/lighthouse/video-benchmark/ego4d/v2/ego4d.json \
+  --metadata-json /home/lighthouse/video-benchmark/data/ego4d/v2/ego4d.json \
   --output-dir data/processed/ego4d_cooking_audio \
   --scenario Cooking \
   --require-audio \
@@ -159,7 +159,7 @@ wc -l data/processed/ego4d/pilot_video_uids.txt
 取得许可后，按 UID 下载短边 540 像素的规范视频，不下载约 5TB 的全分辨率集合：
 
 ```bash
-export EGO4D_ROOT=/home/lighthouse/video-benchmark/ego4d
+export EGO4D_ROOT=/home/lighthouse/video-benchmark/data/ego4d
 
 ego4d \
   --output_directory "$EGO4D_ROOT" \
@@ -178,6 +178,23 @@ H.264 / 短边 540 / 16fps / AAC 64kbps / 保留画面方向
 ```
 
 不要再从 `full_scale` 下载同一批视频后重复缩放。
+
+`vpn` 上的 `/home/lighthouse/video-benchmark/data` 应软连接到数据盘。运行前必须确认：
+
+```bash
+readlink -f /home/lighthouse/video-benchmark/data
+df -hT /home/lighthouse/video-benchmark/data
+```
+
+完整 `full_scale` 和完整 `video_540ss` 都不作为本项目的本地常驻数据。正式处理采用与 EPIC-KITCHENS-100 相同的有界流水线：
+
+1. 只按当前批次的 `video_uid` 下载；
+2. 转码并上传代理视频；
+3. 校验对象存储结果和 URL 清单；
+4. 删除本批下载的视频和本地代理；
+5. 再启动下一批。
+
+元信息和标注可以常驻数据盘，视频文件必须按批次及时清理。
 
 ## 6. 接入现有分层抽取
 
