@@ -253,6 +253,8 @@ python3 scripts/run_hierarchical_extraction_participants.py \
   --manifest-dir data/cluster_inputs/epic37_proxy_manifests \
   --participants all \
   --expected-participants 37 \
+  --data-root data/epic_kitchens_100_precise_v2 \
+  --output-root outputs/epic_kitchens_100_precise_v2 \
   --base-url http://127.0.0.1:8000/v1 \
   --model qwen35-a3b
 ```
@@ -260,9 +262,10 @@ python3 scripts/run_hierarchical_extraction_participants.py \
 编排器对每个参与者依次执行：30 秒切分、micro 抽取与校验、120 秒 window 聚合与校验、完整 source/session 聚合与校验。每层失败结果最多自动重试 3 次；重试只请求缺失记录，最后一次会提高输出 token 上限。数量或结构校验仍不完整时立即停止并报告缺失编号。成功的 `*.clean.json` 会被复用，因此相同命令可直接断点续跑，不会覆盖已有成功结果。
 
 编排器固定使用 `reencode / CRF 23` 生成精确片段。2026-07-14 之前由旧版
-`copy` 模式生成的 micro 输出不能与新片段混用；恢复旧任务时应使用新的
-`--output-root`，保留旧目录用于审计。旧状态表没有时长校验标记，切片脚本会自动
-重新生成对应片段。
+`copy` 模式生成的 micro 输出不能与新片段混用；恢复旧任务时应同时使用新的
+`--data-root` 和 `--output-root`，完整隔离切片、状态表、推理 URL 和三层 JSON，
+保留旧目录用于审计。编排器会验证本地 HTTP 服务实际指向当前 data root；若端口
+仍由旧目录的服务占用会立即停止，此时应关闭旧服务或改用新的 `--http-port`。
 
 清洗阶段首先使用标准 JSON 解析。仅当模型正常结束（`finish_reason=stop`）但存在可恢复的语法错误时，才使用 `json-repair` 生成 clean JSON，并写出同名 `*.repair.json` 审计文件，记录原始响应和修复结果的哈希。因长度上限截断的输出不会被自动修复。已有 `raw_only` 响应会先尝试清洗，成功后不再重复调用模型。
 

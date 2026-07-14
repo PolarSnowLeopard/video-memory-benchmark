@@ -1,7 +1,10 @@
 import json
+import threading
 import sys
 import tempfile
 import unittest
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
@@ -11,12 +14,33 @@ sys.path.insert(0, str(ROOT))
 from scripts.run_hierarchical_extraction_participants import (  # noqa: E402
     build_session_prepare_command,
     discover_participant_manifests,
+    http_server_serves_directory,
     require_validation_complete,
     run_until_clean,
 )
 
 
+class QuietHttpHandler(SimpleHTTPRequestHandler):
+    def log_message(self, _format: str, *args: object) -> None:
+        pass
+
+
 class HierarchicalExtractionParticipantTests(unittest.TestCase):
+    def test_http_server_root_check_rejects_another_data_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as served_tmp, tempfile.TemporaryDirectory() as other_tmp:
+            handler = partial(QuietHttpHandler, directory=served_tmp)
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{server.server_port}"
+            try:
+                self.assertTrue(http_server_serves_directory(base_url, Path(served_tmp)))
+                self.assertFalse(http_server_serves_directory(base_url, Path(other_tmp)))
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     def test_session_preparation_uses_frame_accurate_reencode(self) -> None:
         command = build_session_prepare_command(
             "python3",

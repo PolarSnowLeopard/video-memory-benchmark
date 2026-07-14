@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
@@ -147,6 +148,22 @@ def check_url(url: str, timeout: float = 5.0) -> bool:
             return 200 <= response.status < 300
     except Exception:
         return False
+
+
+def http_server_serves_directory(base_url: str, directory: Path, timeout: float = 2.0) -> bool:
+    directory.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex
+    sentinel = directory / f".video_memory_benchmark_root_{token}"
+    sentinel.write_text(token, encoding="utf-8")
+    try:
+        with urllib.request.urlopen(
+            f"{base_url.rstrip('/')}/{sentinel.name}", timeout=timeout
+        ) as response:
+            return response.read().decode("utf-8") == token
+    except Exception:
+        return False
+    finally:
+        sentinel.unlink(missing_ok=True)
 
 
 def command_runner(command: list[str]) -> None:
@@ -440,7 +457,15 @@ def main() -> None:
     session_root.mkdir(parents=True, exist_ok=True)
     http_process: subprocess.Popen[bytes] | None = None
     http_log = None
-    if not args.external_http_server and not check_url(args.local_url_base):
+    http_reachable = check_url(args.local_url_base)
+    if http_reachable and not http_server_serves_directory(args.local_url_base, session_root):
+        raise SystemExit(
+            f"HTTP server at {args.local_url_base} serves a different directory. "
+            "Stop the old server or choose another --http-port."
+        )
+    if args.external_http_server and not http_reachable:
+        raise SystemExit(f"External video HTTP server is not reachable: {args.local_url_base}")
+    if not args.external_http_server and not http_reachable:
         log_dir = ROOT / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         http_log = (log_dir / "session_http.log").open("ab")
@@ -460,7 +485,7 @@ def main() -> None:
             stderr=subprocess.STDOUT,
         )
         for _ in range(20):
-            if check_url(args.local_url_base, timeout=1):
+            if http_server_serves_directory(args.local_url_base, session_root, timeout=1):
                 break
             time.sleep(0.5)
         else:
