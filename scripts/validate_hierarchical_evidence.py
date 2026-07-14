@@ -170,6 +170,77 @@ def record_id_for(layer: str, record: dict[str, Any]) -> str:
     return "unknown"
 
 
+def clean_output_id(path: Path) -> str:
+    suffix = ".clean.json"
+    if not path.name.endswith(suffix):
+        raise ValueError(f"Not a clean JSON output path: {path}")
+    return path.name[: -len(suffix)]
+
+
+def parent_record_id(layer: str, parent: dict[str, Any]) -> str:
+    keys = {
+        "micro": ("session_id", "record_id", "clip_id"),
+        "window": ("record_id", "window_id"),
+        "session": ("session_id", "record_id", "source_video_id"),
+    }[layer]
+    for key in keys:
+        if parent.get(key):
+            return str(parent[key])
+    return ""
+
+
+def normalize_deterministic_identity(
+    layer: str,
+    record: dict[str, Any],
+    parent: dict[str, Any],
+    canonical_id: str,
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Replace model-copied identity fields with authoritative metadata values."""
+    normalized = copy.deepcopy(record)
+    issues: list[dict[str, str]] = []
+    primary_field = {
+        "micro": "clip_id",
+        "window": "window_id",
+        "session": "session_id",
+    }[layer]
+    expected_values: dict[str, str] = {primary_field: canonical_id}
+
+    expected_source = str(parent.get("source_video_id") or parent.get("video_id") or "")
+    if expected_source:
+        expected_values["source_video_id"] = expected_source
+    expected_participant = str(parent.get("participant_id") or "")
+    if expected_participant and (layer == "session" or "participant_id" in normalized):
+        expected_values["participant_id"] = expected_participant
+    if "record_id" in normalized:
+        expected_values["record_id"] = canonical_id
+
+    for field, expected in expected_values.items():
+        actual = str(normalized.get(field) or "")
+        if actual != expected:
+            shown_actual = actual or "<missing>"
+            issues.append(
+                issue(
+                    layer,
+                    canonical_id,
+                    "warning",
+                    "identity_field_normalized",
+                    f"{field}: {shown_actual} -> {expected}",
+                )
+            )
+            normalized[field] = expected
+    return normalized, issues
+
+
+def merge_quality_issue_codes(
+    normalized: dict[str, Any], issues: list[dict[str, str]]
+) -> None:
+    summary = normalized.get("quality_summary")
+    if not isinstance(summary, dict):
+        return
+    summary["schema_status"] = "failed" if has_blocking(issues) else "passed"
+    summary["issue_codes"] = sorted({item["code"] for item in issues})
+
+
 def add_common_issues(layer: str, record: dict[str, Any]) -> list[dict[str, str]]:
     record_id = record_id_for(layer, record)
     issues: list[dict[str, str]] = []
@@ -950,13 +1021,14 @@ def validate_directory(
     parent_records: list[dict[str, Any]],
     output_dir: Path,
 ) -> None:
-    parent_key = {"micro": "session_id", "window": "record_id", "session": "session_id"}[layer]
     parent_by_id: dict[str, dict[str, Any]] = {}
     for parent in parent_records:
-        keys = [parent_key, "record_id", "window_id", "source_video_id", "video_id"]
-        parent_id = next((str(parent[key]) for key in keys if parent.get(key)), "")
-        if parent_id:
-            parent_by_id[parent_id] = parent
+        parent_id = parent_record_id(layer, parent)
+        if not parent_id:
+            raise ValueError(f"{layer} parent record has no deterministic id: {parent}")
+        if parent_id in parent_by_id:
+            raise ValueError(f"Duplicate {layer} parent record id: {parent_id}")
+        parent_by_id[parent_id] = parent
     validator = {
         "micro": validate_micro_record,
         "window": validate_window_record,
@@ -970,9 +1042,10 @@ def validate_directory(
     accepted = 0
     rejected = 0
     all_issues: list[dict[str, str]] = []
+    matched_parent_ids: set[str] = set()
     for path in input_paths:
         record = json.loads(path.read_text(encoding="utf-8"))
-        record_id = record_id_for(layer, record)
+        record_id = clean_output_id(path)
         parent = parent_by_id.get(record_id)
         if parent is None:
             normalized = copy.deepcopy(record)
@@ -980,7 +1053,13 @@ def validate_directory(
                 issue(layer, record_id, "blocking", "missing_parent_metadata", record_id)
             ]
         else:
-            normalized, current_issues = validator(record, parent)
+            matched_parent_ids.add(record_id)
+            canonical_record, identity_issues = normalize_deterministic_identity(
+                layer, record, parent, record_id
+            )
+            normalized, validation_issues = validator(canonical_record, parent)
+            current_issues = identity_issues + validation_issues
+            merge_quality_issue_codes(normalized, current_issues)
         all_issues.extend(current_issues)
         if has_blocking(current_issues):
             rejected += 1
@@ -992,6 +1071,18 @@ def validate_directory(
         (accepted_dir / path.name).write_text(
             json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
+        )
+
+    for record_id in sorted(set(parent_by_id) - matched_parent_ids):
+        rejected += 1
+        all_issues.append(
+            issue(
+                layer,
+                record_id,
+                "blocking",
+                "missing_model_output",
+                f"Missing clean model output: {record_id}.clean.json",
+            )
         )
     write_reports(output_dir, layer, all_issues, accepted, rejected)
     print(f"{layer}: accepted={accepted} rejected={rejected} issues={len(all_issues)}", flush=True)

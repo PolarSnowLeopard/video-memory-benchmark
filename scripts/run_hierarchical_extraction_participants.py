@@ -418,7 +418,7 @@ def extract_participant(
         expected=expected_window,
         expected_ids=expected_window_ids,
         attempts=args.attempts,
-        final_max_tokens=12288,
+        final_max_tokens=24576,
         runner=command_runner,
         command=[
             args.python,

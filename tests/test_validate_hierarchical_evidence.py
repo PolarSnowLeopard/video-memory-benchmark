@@ -458,13 +458,73 @@ class HierarchicalEvidenceValidatorTests(unittest.TestCase):
             self.assertTrue(accepted.exists())
 
             invalid = valid_session_record()
-            invalid["source_video_id"] = "P30_XX"
+            del invalid["session_summary"]
             input_path.write_text(json.dumps(invalid, ensure_ascii=False), encoding="utf-8")
             validate_directory(
                 "session", input_dir, [valid_session_parent()], output_dir
             )
 
             self.assertFalse(accepted.exists())
+
+    def test_validate_directory_normalizes_model_copied_identity_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            input_path = input_dir / "P30_01_w000.clean.json"
+            record = valid_window_record()
+            record["window_id"] = "P30_XX_w999"
+            record["source_video_id"] = "P30_XX"
+            input_path.write_text(
+                json.dumps(record, ensure_ascii=False), encoding="utf-8"
+            )
+            parent = {
+                "record_id": "P30_01_w000",
+                "window_id": "P30_01_w000",
+                "participant_id": "P30",
+                "source_video_id": "P30_01",
+                "micro_clip_ids": ["P30_01_s000"],
+            }
+
+            validate_directory("window", input_dir, [parent], output_dir)
+
+            report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                {key: report[key] for key in ("records", "accepted", "rejected")},
+                {"records": 1, "accepted": 1, "rejected": 0},
+            )
+            accepted = json.loads(
+                (output_dir / "accepted" / input_path.name).read_text(encoding="utf-8")
+            )
+            self.assertEqual(accepted["window_id"], "P30_01_w000")
+            self.assertEqual(accepted["source_video_id"], "P30_01")
+            self.assertIn(
+                "identity_field_normalized",
+                accepted["quality_summary"]["issue_codes"],
+            )
+            issues = (output_dir / "issues.csv").read_text(encoding="utf-8")
+            self.assertIn("identity_field_normalized", issues)
+            self.assertNotIn("missing_parent_metadata", issues)
+
+    def test_validate_directory_reports_missing_expected_model_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+
+            validate_directory(
+                "session", input_dir, [valid_session_parent()], output_dir
+            )
+
+            report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                {key: report[key] for key in ("records", "accepted", "rejected")},
+                {"records": 1, "accepted": 0, "rejected": 1},
+            )
+            issues = (output_dir / "issues.csv").read_text(encoding="utf-8")
+            self.assertIn("missing_model_output", issues)
 
     def test_validate_directory_removes_stale_accepted_record_before_parse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
