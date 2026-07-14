@@ -7,6 +7,7 @@ import argparse
 import copy
 import csv
 import json
+import math
 import re
 from collections import Counter
 from pathlib import Path
@@ -15,6 +16,7 @@ from typing import Any, Iterable
 
 CONFIDENCES = {"high", "medium", "low"}
 LONG_TERM_RE = re.compile(r"通常|习惯|经常|总是|长期|偏好|喜欢|always|usually|typically", re.IGNORECASE)
+RELATIVE_TIME_RE = re.compile(r"^(\d+):([0-5]\d(?:\.\d+)?)$")
 
 REQUIRED_FIELDS = {
     "micro": [
@@ -220,6 +222,173 @@ def downgrade_reference_issues(issues: list[dict[str, str]]) -> None:
             item["severity"] = "warning"
 
 
+def as_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def expected_micro_duration(record: dict[str, Any], metadata: dict[str, Any]) -> float | None:
+    duration = as_float(metadata.get("duration_sec"))
+    if duration is not None and duration > 0:
+        return duration
+    start = as_float(metadata.get("start_sec"))
+    end = as_float(metadata.get("end_sec"))
+    if start is not None and end is not None and end > start:
+        return end - start
+    clip_range = record.get("clip_time_range")
+    if isinstance(clip_range, dict):
+        start = as_float(clip_range.get("start_sec"))
+        end = as_float(clip_range.get("end_sec"))
+        if start is not None and end is not None and end > start:
+            return end - start
+    return None
+
+
+def parse_relative_timestamp(value: str) -> float:
+    match = RELATIVE_TIME_RE.fullmatch(value.strip())
+    if match is None:
+        raise ValueError(value)
+    minutes, seconds = match.groups()
+    return int(minutes) * 60 + float(seconds)
+
+
+def check_relative_time(
+    record_id: str,
+    field_path: str,
+    value: Any,
+    expected_duration_sec: float | None,
+    issues: list[dict[str, str]],
+    range_mode: str,
+) -> tuple[float, float] | None:
+    text = str(value or "").strip()
+    parts = [part.strip() for part in text.split("-")]
+    valid_part_count = {
+        "point": len(parts) == 1,
+        "range": len(parts) == 2,
+        "either": len(parts) in {1, 2},
+    }[range_mode]
+    try:
+        if not text or not valid_part_count:
+            raise ValueError(text)
+        parsed = [parse_relative_timestamp(part) for part in parts]
+    except ValueError:
+        issues.append(
+            issue(
+                "micro",
+                record_id,
+                "blocking",
+                "invalid_relative_time",
+                f"{field_path}={text!r}",
+            )
+        )
+        return None
+    start_sec = parsed[0]
+    end_sec = parsed[-1]
+    if start_sec > end_sec:
+        issues.append(
+            issue(
+                "micro",
+                record_id,
+                "blocking",
+                "invalid_relative_time",
+                f"{field_path} is reversed: {text}",
+            )
+        )
+        return None
+    if expected_duration_sec is not None:
+        allowed_end = math.ceil(expected_duration_sec - 1e-9)
+        if end_sec > allowed_end:
+            issues.append(
+                issue(
+                    "micro",
+                    record_id,
+                    "blocking",
+                    "relative_time_out_of_bounds",
+                    f"{field_path}={text}; clip duration={expected_duration_sec:.3f}s",
+                )
+            )
+    return start_sec, end_sec
+
+
+def check_micro_times(
+    record: dict[str, Any], metadata: dict[str, Any], issues: list[dict[str, str]]
+) -> None:
+    record_id = record_id_for("micro", record)
+    duration_sec = expected_micro_duration(record, metadata)
+    clip_range = record.get("clip_time_range")
+    if isinstance(clip_range, dict):
+        for key in ("start_sec", "end_sec"):
+            expected = as_float(metadata.get(key))
+            actual = as_float(clip_range.get(key))
+            if expected is not None and (actual is None or abs(actual - expected) > 0.25):
+                issues.append(
+                    issue(
+                        "micro",
+                        record_id,
+                        "blocking",
+                        "clip_time_range_mismatch",
+                        f"{key}: expected={expected} actual={clip_range.get(key)!r}",
+                    )
+                )
+
+    for place_index, place in enumerate(as_list(record.get("places"))):
+        for time_index, value in enumerate(as_list(place.get("evidence_times"))):
+            check_relative_time(
+                record_id,
+                f"places[{place_index}].evidence_times[{time_index}]",
+                value,
+                duration_sec,
+                issues,
+                "either",
+            )
+    for object_index, item in enumerate(as_list(record.get("objects"))):
+        first = check_relative_time(
+            record_id,
+            f"objects[{object_index}].first_seen",
+            item.get("first_seen"),
+            duration_sec,
+            issues,
+            "point",
+        )
+        last = check_relative_time(
+            record_id,
+            f"objects[{object_index}].last_seen",
+            item.get("last_seen"),
+            duration_sec,
+            issues,
+            "point",
+        )
+        if first is not None and last is not None and first[0] > last[0]:
+            issues.append(
+                issue(
+                    "micro",
+                    record_id,
+                    "blocking",
+                    "invalid_relative_time",
+                    f"objects[{object_index}] first_seen is after last_seen",
+                )
+            )
+    time_fields = (
+        ("atomic_events", "time_range", "range"),
+        ("state_observations", "time", "point"),
+        ("state_changes", "time_range", "range"),
+        ("end_state", "evidence_time", "point"),
+        ("uncertainties", "time_range", "either"),
+    )
+    for section, field, range_mode in time_fields:
+        for item_index, item in enumerate(as_list(record.get(section))):
+            check_relative_time(
+                record_id,
+                f"{section}[{item_index}].{field}",
+                item.get(field),
+                duration_sec,
+                issues,
+                range_mode,
+            )
+
+
 def validate_micro_record(
     record: dict[str, Any], metadata: dict[str, Any]
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
@@ -265,6 +434,7 @@ def validate_micro_record(
     expected_source = str(metadata.get("source_video_id") or metadata.get("video_id") or "")
     if expected_source and str(record.get("source_video_id") or "") != expected_source:
         issues.append(issue(layer, record_id, "blocking", "source_video_id_mismatch", expected_source))
+    check_micro_times(record, metadata, issues)
     check_confidences(layer, record_id, record, issues)
     downgrade_reference_issues(issues)
     normalized["quality_summary"] = {

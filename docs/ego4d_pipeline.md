@@ -253,10 +253,30 @@ Ego4D video_540ss
   -> 结构校验和独立质检
 ```
 
-现有的切片、视频调用、文本聚合、结构校验和百炼质检框架可以继续使用。仍需在正式视频试验前完成两项代码工作：
+现有的切片、视频调用、文本聚合、结构校验和百炼质检框架可以继续使用。
+标准代理清单保留 `video_uid` 作为 `video_id`，并保留规范化参与者编号。当前
+micro 提示词只约束第一人称可见事实，不依赖厨房菜谱知识，可用于先行试验；正式扩展到
+非烹饪场景时仍需按场景抽样检查动作和物体枚举覆盖率。
 
-1. 增加 Ego4D 下载目录到标准代理视频 URL 清单的适配器，保留 `video_uid` 和规范化参与者编号。
-2. 新增通用第一人称视频提示词。当前 EPIC-KITCHENS 提示词含有厨房物体和烹饪动作约束，不能用于 Ego4D 全场景。
+集群侧切成 30 秒片段时必须精确重编码，不能直接码流拷贝：
+
+```bash
+python3 scripts/prepare_video_sessions_for_inference.py \
+  --video-url-csv data/cluster_inputs/ego4d_cooking_audio_pilot_proxy_540p16_urls.csv \
+  --data-root data \
+  --source-cache-root data/proxy_from_cos \
+  --download-missing-source \
+  --session-duration-sec 30 \
+  --min-tail-sec 10 \
+  --local-url-base http://127.0.0.1:18080 \
+  --cut-mode reencode \
+  --reencode-crf 23 \
+  --fail-fast
+```
+
+切片脚本会用实际容器时长校验计划时长，默认允许 0.25 秒封装误差。没有通过
+时长校验的记录不会被视为可续跑的完成项。micro 结构校验器还会拒绝任何超过
+该片段 `duration_sec` 的相对时间，防止相邻片段证据进入后续聚合。
 
 Ego4D 的叙述、情景记忆、手物交互等官方标注可作为独立质检信号，但不应直接复制成最终 benchmark 答案。VLM 提取仍是候选证据，最终参考证据要经过结构校验、独立视觉复核和人工抽检。
 

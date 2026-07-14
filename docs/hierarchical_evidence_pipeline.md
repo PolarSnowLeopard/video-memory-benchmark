@@ -34,8 +34,17 @@ python3 scripts/prepare_video_sessions_for_inference.py \
   --download-missing-source \
   --session-duration-sec 30 \
   --min-tail-sec 10 \
-  --local-url-base http://127.0.0.1:18080
+  --local-url-base http://127.0.0.1:18080 \
+  --cut-mode reencode \
+  --reencode-crf 23 \
+  --fail-fast
 ```
+
+固定时长的模型输入必须使用精确重编码。直接码流拷贝受视频关键帧和 GOP
+边界影响，可能把相邻片段的十几秒内容带入当前片段。脚本默认使用
+`reencode`，并在状态表和 URL 表中记录 `actual_duration_sec`、
+`duration_error_sec` 和 `duration_validated`；实际时长误差超过 0.25 秒时不会
+进入推理清单。历史状态表没有 `duration_validated=True` 的片段不会被当作已完成。
 
 输出：
 
@@ -43,6 +52,12 @@ python3 scripts/prepare_video_sessions_for_inference.py \
 data/cos_urls/p30_all_videos_sessions_30s_urls.csv
 data/sessions/P30/sessions_30s/*.mp4
 data/processed/epic_pipeline_runs/p30_all_videos_sessions_30s_status.csv
+```
+
+如果旧片段是用 `--cut-mode copy` 生成的，重新生成时显式增加：
+
+```bash
+--overwrite-sessions --rerun-completed
 ```
 
 在另一个窗口启动本地 HTTP 服务：
@@ -243,6 +258,11 @@ python3 scripts/run_hierarchical_extraction_participants.py \
 ```
 
 编排器对每个参与者依次执行：30 秒切分、micro 抽取与校验、120 秒 window 聚合与校验、完整 source/session 聚合与校验。每层失败结果最多自动重试 3 次；重试只请求缺失记录，最后一次会提高输出 token 上限。数量或结构校验仍不完整时立即停止并报告缺失编号。成功的 `*.clean.json` 会被复用，因此相同命令可直接断点续跑，不会覆盖已有成功结果。
+
+编排器固定使用 `reencode / CRF 23` 生成精确片段。2026-07-14 之前由旧版
+`copy` 模式生成的 micro 输出不能与新片段混用；恢复旧任务时应使用新的
+`--output-root`，保留旧目录用于审计。旧状态表没有时长校验标记，切片脚本会自动
+重新生成对应片段。
 
 清洗阶段首先使用标准 JSON 解析。仅当模型正常结束（`finish_reason=stop`）但存在可恢复的语法错误时，才使用 `json-repair` 生成 clean JSON，并写出同名 `*.repair.json` 审计文件，记录原始响应和修复结果的哈希。因长度上限截断的输出不会被自动修复。已有 `raw_only` 响应会先尝试清洗，成功后不再重复调用模型。
 

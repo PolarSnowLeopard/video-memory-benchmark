@@ -209,6 +209,43 @@ class HierarchicalEvidenceValidatorTests(unittest.TestCase):
         self.assertEqual(reference_issue["severity"], "warning")
         self.assertEqual(normalized["quality_summary"]["schema_status"], "passed")
 
+    def test_micro_validator_rejects_relative_time_past_clip_end(self) -> None:
+        record = valid_micro_record()
+        record["atomic_events"][0]["time_range"] = "00:29-00:44"
+
+        normalized, issues = validate_micro_record(
+            record,
+            {
+                "session_id": "P30_01_s000",
+                "source_video_id": "P30_01",
+                "start_sec": "0",
+                "end_sec": "30",
+                "duration_sec": "30",
+            },
+        )
+
+        self.assertIn("relative_time_out_of_bounds", {item["code"] for item in issues})
+        self.assertEqual(normalized["quality_summary"]["schema_status"], "failed")
+
+    def test_micro_validator_allows_tail_timestamp_rounded_up_to_next_second(self) -> None:
+        record = valid_micro_record()
+        record["clip_time_range"]["end_sec"] = 27.721
+        record["objects"][0]["last_seen"] = "00:28"
+
+        normalized, issues = validate_micro_record(
+            record,
+            {
+                "session_id": "P30_01_s000",
+                "source_video_id": "P30_01",
+                "start_sec": "0",
+                "end_sec": "27.721",
+                "duration_sec": "27.721",
+            },
+        )
+
+        self.assertNotIn("relative_time_out_of_bounds", {item["code"] for item in issues})
+        self.assertEqual(normalized["quality_summary"]["schema_status"], "passed")
+
     def test_window_validator_reports_unknown_clip_reference(self) -> None:
         record = valid_window_record()
         record["evidence_facts"][0]["supporting_clip_ids"] = ["missing"]

@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from scripts.run_hierarchical_extraction_participants import (  # noqa: E402
+    build_session_prepare_command,
     discover_participant_manifests,
     require_validation_complete,
     run_until_clean,
@@ -16,6 +17,18 @@ from scripts.run_hierarchical_extraction_participants import (  # noqa: E402
 
 
 class HierarchicalExtractionParticipantTests(unittest.TestCase):
+    def test_session_preparation_uses_frame_accurate_reencode(self) -> None:
+        command = build_session_prepare_command(
+            "python3",
+            Path("manifest.csv"),
+            Path("data"),
+            "http://127.0.0.1:18080",
+        )
+
+        self.assertEqual(command[command.index("--cut-mode") + 1], "reencode")
+        self.assertEqual(command[command.index("--reencode-crf") + 1], "23")
+        self.assertIn("--fail-fast", command)
+
     def test_discovers_and_orders_participant_manifests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

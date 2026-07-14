@@ -9,6 +9,7 @@ import csv
 import math
 import mimetypes
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 VIDEO_SUMMARY = ROOT / "data/processed/epic_kitchens_100/video_summary.csv"
+DEFAULT_CUT_MODE = "reencode"
+DEFAULT_REENCODE_CRF = 23
+DEFAULT_MAX_DURATION_ERROR_SEC = 0.25
+FFMPEG_DURATION_RE = re.compile(
+    r"Duration:\s*(\d+):([0-5]\d):([0-5]\d(?:\.\d+)?)"
+)
 
 STATUS_FIELDS = [
     "updated_at",
@@ -31,6 +38,9 @@ STATUS_FIELDS = [
     "start_sec",
     "end_sec",
     "duration_sec",
+    "actual_duration_sec",
+    "duration_error_sec",
+    "duration_validated",
     "source_proxy_path",
     "session_path",
     "session_size_bytes",
@@ -47,6 +57,9 @@ URL_FIELDS = [
     "start_sec",
     "end_sec",
     "duration_sec",
+    "actual_duration_sec",
+    "duration_error_sec",
+    "duration_validated",
     "local_path",
     "bucket",
     "region",
@@ -75,6 +88,15 @@ def upsert_csv(path: Path, row: dict[str, str], fieldnames: list[str], key_field
     filtered = [r for r in rows if tuple(r.get(k, "") for k in key_fields) != tuple(row.get(k, "") for k in key_fields)]
     filtered.append({k: row.get(k, "") for k in fieldnames})
     write_csv(path, filtered, fieldnames)
+
+
+def remove_csv_row(path: Path, fieldnames: list[str], key_field: str, key_value: str) -> None:
+    if not path.exists():
+        return
+    rows = read_csv(path)
+    filtered = [row for row in rows if row.get(key_field) != key_value]
+    if len(filtered) != len(rows):
+        write_csv(path, filtered, fieldnames)
 
 
 def read_cos_config(path: Path) -> dict[str, str]:
@@ -166,6 +188,34 @@ def ffprobe_duration(path: Path) -> float:
 ffprobe_duration.ffprobe_bin = "ffprobe"  # type: ignore[attr-defined]
 
 
+def parse_ffmpeg_duration(output: str) -> float:
+    match = FFMPEG_DURATION_RE.search(output)
+    if match is None:
+        raise ValueError("Could not parse container duration from ffmpeg output")
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def ffmpeg_container_duration(path: Path, ffmpeg_bin: str) -> float:
+    result = subprocess.run(
+        [ffmpeg_bin, "-hide_banner", "-i", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    return parse_ffmpeg_duration(result.stderr)
+
+
+def validate_session_duration(actual_sec: float, planned_sec: float, max_error_sec: float) -> float:
+    error_sec = abs(actual_sec - planned_sec)
+    if error_sec > max_error_sec:
+        raise RuntimeError(
+            "Session duration mismatch: "
+            f"planned={fmt_float(planned_sec)}s actual={fmt_float(actual_sec)}s "
+            f"error={fmt_float(error_sec)}s limit={fmt_float(max_error_sec)}s"
+        )
+    return error_sec
+
+
 def metadata_durations(path: Path) -> dict[str, float]:
     if not path.exists():
         return {}
@@ -214,12 +264,24 @@ def split_bounds(duration_sec: float, session_duration_sec: int, min_tail_sec: i
 def completed_session_ids(status_csv: Path, url_csv: Path, require_url: bool) -> set[str]:
     if not status_csv.exists():
         return set()
-    ok_ids = {row["session_id"] for row in read_csv(status_csv) if row.get("status") == "ok" and row.get("session_id")}
+    ok_ids = {
+        row["session_id"]
+        for row in read_csv(status_csv)
+        if row.get("status") == "ok"
+        and row.get("duration_validated", "").lower() == "true"
+        and row.get("session_id")
+    }
     if not require_url:
         return ok_ids
     if not url_csv.exists():
         return set()
-    uploaded_ids = {row["session_id"] for row in read_csv(url_csv) if row.get("signed_url") and row.get("session_id")}
+    uploaded_ids = {
+        row["session_id"]
+        for row in read_csv(url_csv)
+        if row.get("signed_url")
+        and row.get("duration_validated", "").lower() == "true"
+        and row.get("session_id")
+    }
     return ok_ids & uploaded_ids
 
 
@@ -272,7 +334,7 @@ def cut_session(source_path: Path, output_path: Path, start_sec: float, duration
             "-preset",
             "veryfast",
             "-crf",
-            "28",
+            str(getattr(args, "reencode_crf", DEFAULT_REENCODE_CRF)),
             "-pix_fmt",
             "yuv420p",
         ]
@@ -382,10 +444,28 @@ def process_session(
         download_source_proxy(row, source_path, args.dry_run)
     if not args.dry_run and not source_path.exists():
         raise RuntimeError(f"source proxy missing: {source_path}")
-    if args.overwrite_sessions or not session_path.exists():
+    validated_session_ids = getattr(args, "validated_session_ids", set())
+    should_cut = (
+        args.overwrite_sessions
+        or not session_path.exists()
+        or session_id not in validated_session_ids
+    )
+    if should_cut:
+        if not args.dry_run:
+            remove_csv_row(args.url_csv, URL_FIELDS, "session_id", session_id)
         cut_session(source_path, session_path, start_sec, duration_sec, args)
     if not args.dry_run and not session_path.exists():
         raise RuntimeError(f"session clip missing after cut: {session_path}")
+
+    actual_duration_sec: float | None = None
+    duration_error_sec: float | None = None
+    if not args.dry_run:
+        actual_duration_sec = ffmpeg_container_duration(session_path, args.ffmpeg_bin)
+        duration_error_sec = validate_session_duration(
+            actual_duration_sec,
+            duration_sec,
+            args.max_duration_error_sec,
+        )
 
     session_size = str(session_path.stat().st_size if session_path.exists() else "")
     signed_url = ""
@@ -400,6 +480,9 @@ def process_session(
             "start_sec": fmt_float(start_sec),
             "end_sec": fmt_float(end_sec),
             "duration_sec": fmt_float(duration_sec),
+            "actual_duration_sec": fmt_float(actual_duration_sec) if actual_duration_sec is not None else "",
+            "duration_error_sec": fmt_float(duration_error_sec) if duration_error_sec is not None else "",
+            "duration_validated": str(actual_duration_sec is not None),
             "local_path": str(session_path),
             "bucket": "",
             "region": "",
@@ -425,6 +508,9 @@ def process_session(
             "start_sec": fmt_float(start_sec),
             "end_sec": fmt_float(end_sec),
             "duration_sec": fmt_float(duration_sec),
+            "actual_duration_sec": fmt_float(actual_duration_sec) if actual_duration_sec is not None else "",
+            "duration_error_sec": fmt_float(duration_error_sec) if duration_error_sec is not None else "",
+            "duration_validated": str(actual_duration_sec is not None),
             "local_path": str(session_path),
             "bucket": cos["bucket"],
             "region": cos["region"],
@@ -454,6 +540,9 @@ def process_session(
         "start_sec": fmt_float(start_sec),
         "end_sec": fmt_float(end_sec),
         "duration_sec": fmt_float(duration_sec),
+        "actual_duration_sec": fmt_float(actual_duration_sec) if actual_duration_sec is not None else "",
+        "duration_error_sec": fmt_float(duration_error_sec) if duration_error_sec is not None else "",
+        "duration_validated": str(actual_duration_sec is not None),
         "source_proxy_path": str(source_path),
         "session_path": str(session_path),
         "session_size_bytes": session_size,
@@ -478,7 +567,18 @@ def main() -> None:
         "--local-url-base",
         help="Emit local HTTP URLs instead of uploading sessions, e.g. http://127.0.0.1:18080.",
     )
-    parser.add_argument("--cut-mode", choices=["copy", "reencode"], default="copy")
+    parser.add_argument(
+        "--cut-mode",
+        choices=["copy", "reencode"],
+        default=DEFAULT_CUT_MODE,
+        help="reencode is frame-accurate; copy may include adjacent GOP content.",
+    )
+    parser.add_argument("--reencode-crf", type=int, default=DEFAULT_REENCODE_CRF)
+    parser.add_argument(
+        "--max-duration-error-sec",
+        type=float,
+        default=DEFAULT_MAX_DURATION_ERROR_SEC,
+    )
     parser.add_argument("--ffmpeg-bin", help="Path to ffmpeg. Defaults to PATH, FFMPEG_BIN, then imageio-ffmpeg.")
     parser.add_argument("--ffprobe-bin", help="Path to ffprobe. Defaults to PATH or FFPROBE_BIN.")
     parser.add_argument("--ffmpeg-threads", type=int, default=2)
@@ -499,6 +599,10 @@ def main() -> None:
         raise SystemExit("--min-tail-sec must be >= 0")
     if args.ffmpeg_threads < 0:
         raise SystemExit("--ffmpeg-threads must be >= 0")
+    if not 0 <= args.reencode_crf <= 51:
+        raise SystemExit("--reencode-crf must be between 0 and 51")
+    if args.max_duration_error_sec < 0:
+        raise SystemExit("--max-duration-error-sec must be >= 0")
     if args.local_url_base and args.delete_session_after_upload:
         raise SystemExit("--delete-session-after-upload cannot be used with --local-url-base")
 
@@ -536,6 +640,9 @@ def main() -> None:
         cos = {"bucket": "DRY_RUN_BUCKET", "region": "DRY_RUN_REGION"}
 
     require_url = bool(args.local_url_base) or not args.skip_upload
+    args.validated_session_ids = completed_session_ids(
+        args.status_csv, args.url_csv, require_url=False
+    )
     completed = set() if args.rerun_completed else completed_session_ids(args.status_csv, args.url_csv, require_url)
 
     print(f"Video URL CSV: {args.video_url_csv}", flush=True)
@@ -543,6 +650,9 @@ def main() -> None:
     print(f"Session duration: {args.session_duration_sec}s", flush=True)
     print(f"Min tail: {args.min_tail_sec}s", flush=True)
     print(f"Cut mode: {args.cut_mode}", flush=True)
+    if args.cut_mode == "reencode":
+        print(f"Reencode CRF: {args.reencode_crf}", flush=True)
+    print(f"Max duration error: {fmt_float(args.max_duration_error_sec)}s", flush=True)
     print(f"Status CSV: {args.status_csv}", flush=True)
     print(f"URL CSV: {args.url_csv}", flush=True)
     if args.local_url_base:
@@ -582,6 +692,9 @@ def main() -> None:
                     "start_sec": fmt_float(start_sec),
                     "end_sec": fmt_float(end_sec),
                     "duration_sec": fmt_float(end_sec - start_sec),
+                    "actual_duration_sec": "",
+                    "duration_error_sec": "",
+                    "duration_validated": "False",
                     "source_proxy_path": str(source_proxy_path(row, args)),
                     "session_path": "",
                     "session_size_bytes": "",

@@ -159,6 +159,33 @@ def resolve_path(value: str) -> Path:
     return path if path.is_absolute() else ROOT / path
 
 
+def build_session_prepare_command(
+    python: str, manifest: Path, data_root: Path, local_url_base: str
+) -> list[str]:
+    return [
+        python,
+        "scripts/prepare_video_sessions_for_inference.py",
+        "--video-url-csv",
+        str(manifest),
+        "--data-root",
+        str(data_root),
+        "--source-cache-root",
+        str(data_root / "proxy_from_cos"),
+        "--download-missing-source",
+        "--session-duration-sec",
+        "30",
+        "--min-tail-sec",
+        "10",
+        "--cut-mode",
+        "reencode",
+        "--reencode-crf",
+        "23",
+        "--local-url-base",
+        local_url_base,
+        "--fail-fast",
+    ]
+
+
 def extract_participant(
     participant: str,
     manifest: Path,
@@ -181,25 +208,12 @@ def extract_participant(
         path.mkdir(parents=True, exist_ok=True)
 
     command_runner(
-        [
+        build_session_prepare_command(
             args.python,
-            "scripts/prepare_video_sessions_for_inference.py",
-            "--video-url-csv",
-            str(manifest),
-            "--data-root",
-            str(data_root),
-            "--source-cache-root",
-            str(data_root / "proxy_from_cos"),
-            "--download-missing-source",
-            "--session-duration-sec",
-            "30",
-            "--min-tail-sec",
-            "10",
-            "--cut-mode",
-            "copy",
-            "--local-url-base",
+            manifest,
+            data_root,
             args.local_url_base,
-        ]
+        )
     )
 
     expected_micro_ids = csv_record_ids(micro_csv, "session_id")
