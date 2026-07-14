@@ -21,7 +21,7 @@
     "start_sec": "复制输入 JSON 中的 start_sec",
     "end_sec": "复制输入 JSON 中的 end_sec"
   },
-  "session_summary": "一句话概括本 session 的厨房活动、主要任务和关键状态变化",
+  "session_summary": "一句话概括本 session 的主要活动、任务、交互和关键状态变化",
   "session_timeline": [
     {
       "segment_id": "seg_1",
@@ -34,7 +34,7 @@
     {
       "entity_id": "sent_1",
       "name": "session 级合并后的实体名称",
-      "entity_type": "place|object|food|tool|appliance|container|other",
+      "entity_type": "place|object|person|food|container|tool|appliance|furniture|clothing|document|device|vehicle|personal_item|material|medicine|animal|other",
       "distinctive_attributes": ["跨 session 可能有用的识别属性"],
       "supporting_window_ids": ["window_id"],
       "confidence": "high|medium|low"
@@ -45,7 +45,7 @@
       "update_id": "supdate_1",
       "time_range": "相对原始视频的秒范围",
       "entity_id": "sent_1",
-      "attribute": "location|container|open_closed|on_off|cleanliness|fullness|quantity|covered|task_progress|other",
+      "attribute": "location|container|possession|open_closed|on_off|condition|cleanliness|fullness|quantity|covered|configuration|task_progress|visibility|other",
       "before": "变化前状态；如果 session 开始前不可见，写 unknown",
       "after": "变化后状态",
       "supporting_window_ids": ["window_id"],
@@ -55,7 +55,7 @@
   "session_final_state": [
     {
       "entity_id": "sent_1",
-      "attribute": "location|container|open_closed|on_off|cleanliness|fullness|quantity|covered|task_progress|other",
+      "attribute": "location|container|possession|open_closed|on_off|condition|cleanliness|fullness|quantity|covered|configuration|task_progress|visibility|other",
       "value": "session 结束时可支持的状态",
       "supporting_window_ids": ["window_id"],
       "confidence": "high|medium|low"
@@ -73,7 +73,7 @@
   "cross_session_evidence_candidates": [
     {
       "candidate_id": "memcand_1",
-      "type": "stable_layout|object_location|object_state|state_to_verify_later|procedure_candidate|anomaly_or_change_candidate",
+      "type": "stable_layout|entity_location|entity_state|person_or_social_context|document_or_device_state|task_or_goal_state|state_to_verify_later|procedure_candidate|anomaly_or_change_candidate|other",
       "claim": "只写本 session 支持的观察事实，不写成长期结论",
       "entity_ids": ["sent_1"],
       "observed_value": "本 session 观察到的值",

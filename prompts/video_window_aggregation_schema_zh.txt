@@ -26,7 +26,7 @@
     {
       "entity_id": "ent_1",
       "name": "合并后的实体名称",
-      "entity_type": "place|object|food|tool|appliance|container|other",
+      "entity_type": "place|object|person|food|container|tool|appliance|furniture|clothing|document|device|vehicle|personal_item|material|medicine|animal|other",
       "source_ids": ["micro-clip 中原始 place_id/object_id，格式建议 clip_id:local_id"],
       "distinctive_attributes": ["可用于后续跨窗口追踪的属性"],
       "supporting_clip_ids": ["clip_id"],
@@ -37,7 +37,7 @@
     {
       "event_id": "wevent_1",
       "time_range": "相对原始视频的秒范围，例如 30-58",
-      "action_type": "move|pick_up|put_down|open|close|clean|cut|mix|cook|pour|wash|cover|uncover|search|inspect|store|retrieve|discard|other",
+      "action_type": "move|pick_up|put_down|open|close|use|operate|clean|cut|mix|cook|pour|wash|cover|uncover|search|inspect|store|retrieve|discard|enter|exit|travel|handover|receive|assemble|disassemble|repair|write|read|communicate|wear|take_off|eat|drink|other",
       "action": "聚合后的可见动作",
       "entity_ids": ["ent_1"],
       "pre_state": "动作前状态；无法判断则 null",
@@ -51,7 +51,7 @@
       "change_id": "wchange_1",
       "time_range": "相对原始视频的秒范围，例如 30-58",
       "entity_id": "ent_1",
-      "attribute": "location|container|open_closed|on_off|cleanliness|fullness|quantity|covered|task_progress|other",
+      "attribute": "location|container|possession|open_closed|on_off|condition|cleanliness|fullness|quantity|covered|configuration|task_progress|visibility|other",
       "before": "窗口内变化前状态；如果开始前不可见，写 unknown",
       "after": "窗口内变化后状态",
       "supporting_event_ids": ["wevent_1"],
@@ -62,7 +62,7 @@
   "window_end_state": [
     {
       "entity_id": "ent_1",
-      "attribute": "location|container|open_closed|on_off|cleanliness|fullness|quantity|covered|task_progress|other",
+      "attribute": "location|container|possession|open_closed|on_off|condition|cleanliness|fullness|quantity|covered|configuration|task_progress|visibility|other",
       "value": "该窗口结束时的状态",
       "supporting_clip_ids": ["clip_id"],
       "confidence": "high|medium|low"
@@ -82,7 +82,7 @@
       "fact_id": "fact_1",
       "claim": "只写该窗口内可支持的观察事实，不写长期结论",
       "entity_ids": ["ent_1"],
-      "fact_type": "layout|object_location|object_state|state_change|procedure_step|open_thread|other",
+      "fact_type": "layout|entity_location|entity_state|state_change|interaction|document_or_device_state|procedure_step|task_progress|open_thread|other",
       "supporting_clip_ids": ["clip_id"],
       "why_useful_for_memory": "它为何可能用于之后构建跨会话记忆问题",
       "confidence": "high|medium|low"
