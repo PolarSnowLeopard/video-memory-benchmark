@@ -72,13 +72,12 @@ ego4d \
   --yes
 ```
 
-按官方当前目录约定，元信息通常位于：
+不同版本的官方命令行工具可能把元信息放在根目录或版本目录。不要硬编码位置，用下面的命令确认：
 
 ```text
+/home/lighthouse/video-benchmark/data/ego4d/ego4d.json
 /home/lighthouse/video-benchmark/data/ego4d/v2/ego4d.json
 ```
-
-如安装版本的目录略有差异，用下面的命令确认：
 
 ```bash
 find "$EGO4D_ROOT" -name ego4d.json -type f -print
@@ -94,8 +93,12 @@ find "$EGO4D_ROOT" -name ego4d.json -type f -print
 cd /home/lighthouse/video-memory-benchmark
 git pull
 
+export EGO4D_ROOT=/home/lighthouse/video-benchmark/data/ego4d
+export EGO4D_METADATA="$(find "$EGO4D_ROOT" -name ego4d.json -type f -print -quit)"
+test -n "$EGO4D_METADATA"
+
 python3 scripts/analyze_ego4d_metadata.py \
-  --metadata-json /home/lighthouse/video-benchmark/data/ego4d/v2/ego4d.json \
+  --metadata-json "$EGO4D_METADATA" \
   --output-dir data/processed/ego4d
 ```
 
@@ -114,7 +117,7 @@ python3 scripts/analyze_ego4d_metadata.py \
 
 ```bash
 python3 scripts/analyze_ego4d_metadata.py \
-  --metadata-json /home/lighthouse/video-benchmark/data/ego4d/v2/ego4d.json \
+  --metadata-json "$EGO4D_METADATA" \
   --output-dir data/processed/ego4d_cooking_audio \
   --scenario Cooking \
   --require-audio \
@@ -164,7 +167,7 @@ export EGO4D_ROOT=/home/lighthouse/video-benchmark/data/ego4d
 ego4d \
   --output_directory "$EGO4D_ROOT" \
   --datasets video_540ss \
-  --video_uid_file /home/lighthouse/video-memory-benchmark/data/processed/ego4d/pilot_video_uids.txt \
+  --video_uid_file /home/lighthouse/video-memory-benchmark/data/processed/ego4d_cooking_audio/pilot_video_uids.txt \
   --version v2_1 \
   --aws_profile_name ego4d \
   --no-metadata \
@@ -196,7 +199,48 @@ df -hT /home/lighthouse/video-benchmark/data
 
 元信息和标注可以常驻数据盘，视频文件必须按批次及时清理。
 
-## 6. 接入现有分层抽取
+## 6. 转码、校验并上传代理视频
+
+`run_ego4d_vpn_batch.py` 直接消费元信息审计生成的清单。每条记录依次执行：
+
+1. 缺少源视频时，只按当前 `video_uid` 调用官方下载工具；
+2. 用 `ffprobe` 确认源视频可解码；
+3. 转为 H.264、短边 540、16 帧、AAC 64kbps；
+4. 再次校验编码、分辨率、帧率、时长和音频；
+5. 上传对象存储，并用对象大小核对上传结果；
+6. 先持久化状态表和签名地址清单，再按参数删除本地源视频与代理视频。
+
+试点批次的完整命令：
+
+```bash
+cd /home/lighthouse/video-memory-benchmark
+source /home/lighthouse/.venvs/ego4d/bin/activate
+
+python3 scripts/run_ego4d_vpn_batch.py \
+  --manifest data/processed/ego4d_cooking_audio/pilot_manifest.csv \
+  --ego4d-root /home/lighthouse/video-benchmark/data/ego4d \
+  --ego4d-video-dir /home/lighthouse/video-benchmark/data/ego4d/v2/video_540ss \
+  --data-root /home/lighthouse/video-benchmark/data \
+  --aws-profile ego4d \
+  --cos-config ~/.cos.conf \
+  --cos-prefix video-benchmark/ego4d \
+  --run-name ego4d_cooking_audio_pilot \
+  --ffmpeg-threads 4 \
+  --delete-raw-after-upload \
+  --delete-proxy-after-upload \
+  --fail-fast
+```
+
+输出位于数据盘：
+
+```text
+/home/lighthouse/video-benchmark/data/processed/ego4d_pipeline_runs/ego4d_cooking_audio_pilot_status.csv
+/home/lighthouse/video-benchmark/data/cos_urls/ego4d_cooking_audio_pilot_proxy_540p16_urls.csv
+```
+
+脚本可以安全续跑：只有状态为 `ok` 且 URL 清单中已有签名地址的记录才会跳过。任一步骤失败时不会清理该条记录的本地视频。正式全量处理仍应使用元信息脚本生成的有界清单分批运行，不能把全部 `video_540ss` 一次下载到本地。
+
+## 7. 接入现有分层抽取
 
 下载试验视频后的适配边界是：
 
@@ -216,7 +260,7 @@ Ego4D video_540ss
 
 Ego4D 的叙述、情景记忆、手物交互等官方标注可作为独立质检信号，但不应直接复制成最终 benchmark 答案。VLM 提取仍是候选证据，最终参考证据要经过结构校验、独立视觉复核和人工抽检。
 
-## 7. 跨会话演进的放行条件
+## 8. 跨会话演进的放行条件
 
 如果后续获得可靠的额外时间信息，必须单独保存带来源的顺序表，至少包含：
 
