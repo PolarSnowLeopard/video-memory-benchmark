@@ -13,6 +13,7 @@ data/contact_sheets/
 data/cluster_inputs/
 data/cos_urls/
 data/tmp/
+data/processed/ego4d*/
 data/processed/epic_kitchens_100/manifests/queue/
 data/processed/**/*download_report*.csv
 outputs/
