@@ -278,6 +278,26 @@ python3 scripts/prepare_video_sessions_for_inference.py \
 时长校验的记录不会被视为可续跑的完成项。micro 结构校验器还会拒绝任何超过
 该片段 `duration_sec` 的相对时间，防止相邻片段证据进入后续聚合。
 
+全量抽取前，不要只取 URL 表前若干行。用下面的脚本从每个来源视频确定性地选择
+中部一个片段，先做跨来源烟测：
+
+```bash
+SMOKE_IDS=$(python3 scripts/select_session_smoke_ids.py \
+  --session-csv data/cos_urls/ego4d_cooking_audio_pilot_sessions_30s_urls.csv)
+
+python3 scripts/qwen_video_batch.py \
+  --base-url http://127.0.0.1:8000/v1 \
+  --model qwen35-a3b \
+  --signed-url-csv data/cos_urls/ego4d_cooking_audio_pilot_sessions_30s_urls.csv \
+  --prompt-file prompts/video_micro_evidence_schema_zh.txt \
+  --output-dir outputs/ego4d/cooking_audio_pilot_micro_30s_stratified_smoke \
+  --record-ids "$SMOKE_IDS" \
+  --fps 1 \
+  --max-tokens 4096 \
+  --temperature 0 \
+  --extra-body-json '{"chat_template_kwargs":{"enable_thinking":false}}'
+```
+
 Ego4D 的叙述、情景记忆、手物交互等官方标注可作为独立质检信号，但不应直接复制成最终 benchmark 答案。VLM 提取仍是候选证据，最终参考证据要经过结构校验、独立视觉复核和人工抽检。
 
 ## 8. 跨会话演进的放行条件

@@ -246,6 +246,70 @@ class HierarchicalEvidenceValidatorTests(unittest.TestCase):
         self.assertNotIn("relative_time_out_of_bounds", {item["code"] for item in issues})
         self.assertEqual(normalized["quality_summary"]["schema_status"], "passed")
 
+    def test_micro_validator_warns_about_uncalibrated_confidence(self) -> None:
+        record = valid_micro_record()
+        record["state_observations"] = [
+            {
+                "obs_id": f"obs_{index}",
+                "time": f"00:0{index}",
+                "entity_id": "obj_1",
+                "attribute": "location",
+                "value": "操作台",
+                "evidence": "画面可见",
+                "confidence": "high",
+            }
+            for index in range(6)
+        ]
+
+        normalized, issues = validate_micro_record(
+            record,
+            {
+                "session_id": "P30_01_s000",
+                "source_video_id": "P30_01",
+                "start_sec": "0",
+                "end_sec": "30",
+            },
+        )
+
+        self.assertIn("uncalibrated_confidence", {item["code"] for item in issues})
+        self.assertEqual(normalized["quality_summary"]["schema_status"], "passed")
+
+    def test_micro_validator_warns_about_irrelevant_clothing_and_category(self) -> None:
+        record = valid_micro_record()
+        record["objects"][0]["name"] = "木质砧板"
+        record["objects"][0]["category"] = "furniture"
+        record["objects"].append(
+            {
+                "object_id": "obj_2",
+                "name": "蓝色手套",
+                "category": "clothing",
+                "distinctive_attributes": ["蓝色"],
+                "first_seen": "00:01",
+                "last_seen": "00:20",
+                "initial_location": "手上",
+                "final_location": "手上",
+                "initial_state": "佩戴中",
+                "final_state": "佩戴中",
+                "trackability": "high",
+                "confidence": "high",
+            }
+        )
+
+        normalized, issues = validate_micro_record(
+            record,
+            {
+                "session_id": "P30_01_s000",
+                "source_video_id": "P30_01",
+                "start_sec": "0",
+                "end_sec": "30",
+            },
+        )
+
+        codes = {item["code"] for item in issues}
+        self.assertIn("unreferenced_clothing_object", codes)
+        self.assertIn("inconsistent_object_category", codes)
+        self.assertEqual(normalized["quality_summary"]["schema_status"], "passed")
+
     def test_window_validator_reports_unknown_clip_reference(self) -> None:
         record = valid_window_record()
         record["evidence_facts"][0]["supporting_clip_ids"] = ["missing"]

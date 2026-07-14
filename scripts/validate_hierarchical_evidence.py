@@ -389,6 +389,79 @@ def check_micro_times(
             )
 
 
+def check_micro_semantic_warnings(
+    record: dict[str, Any], issues: list[dict[str, str]]
+) -> None:
+    record_id = record_id_for("micro", record)
+    stateful_entity_ids = {
+        str(item.get("entity_id") or "")
+        for item in as_list(record.get("state_changes"))
+    }
+    for item in as_list(record.get("objects")):
+        object_id = str(item.get("object_id") or "")
+        name = str(item.get("name") or "")
+        category = str(item.get("category") or "")
+        if category == "clothing" and object_id not in stateful_entity_ids:
+            issues.append(
+                issue(
+                    "micro",
+                    record_id,
+                    "warning",
+                    "unreferenced_clothing_object",
+                    f"{object_id}:{name}",
+                )
+            )
+        if "砧板" in name and category != "tool":
+            issues.append(
+                issue(
+                    "micro",
+                    record_id,
+                    "warning",
+                    "inconsistent_object_category",
+                    f"{object_id}:{name} category={category}",
+                )
+            )
+
+    confidence_values: list[str] = []
+
+    def collect_confidences(value: Any) -> None:
+        if isinstance(value, dict):
+            if "confidence" in value:
+                confidence_values.append(str(value["confidence"]))
+            for child in value.values():
+                collect_confidences(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect_confidences(child)
+
+    collect_confidences(record)
+    if len(confidence_values) >= 10 and set(confidence_values) == {"high"}:
+        issues.append(
+            issue(
+                "micro",
+                record_id,
+                "warning",
+                "uncalibrated_confidence",
+                f"all {len(confidence_values)} confidence values are high",
+            )
+        )
+
+    for section in ("atomic_events", "state_changes"):
+        for item in as_list(record.get(section)):
+            value = str(item.get("time_range") or "")
+            parts = value.split("-")
+            if len(parts) == 2 and parts[0].strip() == parts[1].strip():
+                issues.append(
+                    issue(
+                        "micro",
+                        record_id,
+                        "warning",
+                        "zero_duration_range",
+                        f"{section}:{value}",
+                    )
+                )
+
+
 def validate_micro_record(
     record: dict[str, Any], metadata: dict[str, Any]
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
@@ -436,6 +509,7 @@ def validate_micro_record(
         issues.append(issue(layer, record_id, "blocking", "source_video_id_mismatch", expected_source))
     check_micro_times(record, metadata, issues)
     check_confidences(layer, record_id, record, issues)
+    check_micro_semantic_warnings(record, issues)
     downgrade_reference_issues(issues)
     normalized["quality_summary"] = {
         "schema_status": "failed" if has_blocking(issues) else "passed",
