@@ -23,6 +23,7 @@ DEFAULT_CUT_MODE = "reencode"
 DEFAULT_REENCODE_CRF = 23
 DEFAULT_MAX_DURATION_ERROR_SEC = 0.25
 DEFAULT_MAX_SOURCE_DURATION_ERROR_SEC = 1.0
+DEFAULT_SOURCE_TAIL_PROBE_OFFSET_SEC = 5.0
 DEFAULT_DOWNLOAD_ATTEMPTS = 3
 FFMPEG_DURATION_RE = re.compile(
     r"Duration:\s*(\d+):([0-5]\d):([0-5]\d(?:\.\d+)?)"
@@ -203,11 +204,45 @@ def parse_ffmpeg_duration(output: str) -> float:
 
 def ffmpeg_container_duration(path: Path, ffmpeg_bin: str) -> float:
     result = subprocess.run(
-        [ffmpeg_bin, "-hide_banner", "-i", str(path)],
+        [ffmpeg_bin, "-nostdin", "-hide_banner", "-i", str(path)],
         capture_output=True,
         text=True,
     )
     return parse_ffmpeg_duration(result.stderr)
+
+
+def ffmpeg_can_decode_frame_at(path: Path, start_sec: float, ffmpeg_bin: str) -> bool:
+    result = subprocess.run(
+        [
+            ffmpeg_bin,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-ss",
+            fmt_float(start_sec),
+            "-i",
+            str(path),
+            "-map",
+            "0:v:0",
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False
+    return any(
+        line.startswith("frame=") and int(line.partition("=")[2]) > 0
+        for line in result.stdout.splitlines()
+    )
 
 
 def validate_session_duration(actual_sec: float, planned_sec: float, max_error_sec: float) -> float:
@@ -295,6 +330,7 @@ def cut_session(source_path: Path, output_path: Path, start_sec: float, duration
     if args.cut_mode == "copy":
         cmd = [
             args.ffmpeg_bin,
+            "-nostdin",
             "-hide_banner",
             "-loglevel",
             "error",
@@ -320,6 +356,7 @@ def cut_session(source_path: Path, output_path: Path, start_sec: float, duration
     else:
         cmd = [
             args.ffmpeg_bin,
+            "-nostdin",
             "-hide_banner",
             "-loglevel",
             "error",
@@ -484,7 +521,25 @@ def source_duration(
             f"video={video_id} expected={fmt_float(expected)}s actual={fmt_float(actual)}s "
             f"error={fmt_float(abs(actual - expected))}s limit={fmt_float(max_error_sec)}s"
         )
+    if expected is not None:
+        probe_start = max(0.0, expected - DEFAULT_SOURCE_TAIL_PROBE_OFFSET_SEC)
+        if not ffmpeg_can_decode_frame_at(source_path, probe_start, ffmpeg_bin):
+            raise RuntimeError(
+                "Source proxy media tail missing: "
+                f"video={video_id} expected={fmt_float(expected)}s "
+                f"probe_start={fmt_float(probe_start)}s"
+            )
     return actual
+
+
+def is_source_integrity_error(exc: Exception) -> bool:
+    message = str(exc)
+    return message.startswith(
+        (
+            "Source proxy duration mismatch:",
+            "Source proxy media tail missing:",
+        )
+    )
 
 
 def process_session(
@@ -793,12 +848,11 @@ def main() -> None:
                 args.ffmpeg_bin,
             )
         except RuntimeError as exc:
-            if (
-                source_was_present
-                and args.download_missing_source
-                and str(exc).startswith("Source proxy duration mismatch:")
-            ):
-                print(f"Removing stale source proxy and downloading again: {source_path}", flush=True)
+            if args.download_missing_source and is_source_integrity_error(exc):
+                print(
+                    f"Replacing invalid source proxy after integrity failure: {source_path}",
+                    flush=True,
+                )
                 source_path.unlink(missing_ok=True)
                 download_source_proxy(
                     row,
