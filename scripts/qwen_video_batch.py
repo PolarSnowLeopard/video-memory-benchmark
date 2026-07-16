@@ -161,6 +161,7 @@ def main() -> None:
     parser.add_argument("--api-key", default="EMPTY")
     parser.add_argument("--model", required=True)
     parser.add_argument("--prompt-file", default="video_event_schema_zh.txt")
+    parser.add_argument("--prompt-suffix", help="Additional retry-specific instruction appended to the prompt.")
     parser.add_argument("--output-dir", default="outputs")
     parser.add_argument("--fps", type=float, default=1.0)
     parser.add_argument("--max-tokens", type=int, default=8192)
@@ -200,6 +201,8 @@ def main() -> None:
         selected = selected[: args.limit]
 
     prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+    if args.prompt_suffix:
+        prompt = f"{prompt.rstrip()}\n\n{args.prompt_suffix.strip()}"
     output_dir = Path(args.output_dir)
     status_csv = output_dir / "batch_status.csv"
     client = OpenAI(api_key=args.api_key, base_url=args.base_url, timeout=3600)

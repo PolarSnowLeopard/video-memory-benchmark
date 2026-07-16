@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,8 @@ VIDEO_SUMMARY = ROOT / "data/processed/epic_kitchens_100/video_summary.csv"
 DEFAULT_CUT_MODE = "reencode"
 DEFAULT_REENCODE_CRF = 23
 DEFAULT_MAX_DURATION_ERROR_SEC = 0.25
+DEFAULT_MAX_SOURCE_DURATION_ERROR_SEC = 1.0
+DEFAULT_DOWNLOAD_ATTEMPTS = 3
 FFMPEG_DURATION_RE = re.compile(
     r"Duration:\s*(\d+):([0-5]\d):([0-5]\d(?:\.\d+)?)"
 )
@@ -401,7 +404,14 @@ def source_proxy_path(row: dict[str, str], args: argparse.Namespace) -> Path:
     return Path(row["local_path"])
 
 
-def download_source_proxy(row: dict[str, str], source_path: Path, dry_run: bool) -> None:
+def download_source_proxy(
+    row: dict[str, str],
+    source_path: Path,
+    dry_run: bool,
+    *,
+    attempts: int = DEFAULT_DOWNLOAD_ATTEMPTS,
+    retry_delay_sec: float = 3.0,
+) -> None:
     signed_url = row.get("signed_url")
     if not signed_url:
         raise RuntimeError(f"Cannot download missing source without signed_url: {source_video_id(row)}")
@@ -410,16 +420,37 @@ def download_source_proxy(row: dict[str, str], source_path: Path, dry_run: bool)
     print(f"Downloading source proxy: {source_video_id(row)} -> {source_path}", flush=True)
     if dry_run:
         return
-    with urllib.request.urlopen(signed_url, timeout=3600) as response, tmp_path.open("wb") as f:
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            f.write(chunk)
-    tmp_path.replace(source_path)
+    for attempt in range(1, attempts + 1):
+        tmp_path.unlink(missing_ok=True)
+        try:
+            downloaded = 0
+            with urllib.request.urlopen(signed_url, timeout=3600) as response, tmp_path.open("wb") as f:
+                content_length = response.headers.get("Content-Length")
+                expected_size = int(content_length) if content_length else None
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+            if expected_size is not None and downloaded != expected_size:
+                raise RuntimeError(
+                    f"Incomplete proxy download: expected={expected_size} bytes actual={downloaded} bytes"
+                )
+            tmp_path.replace(source_path)
+            return
+        except Exception as exc:
+            tmp_path.unlink(missing_ok=True)
+            if attempt >= attempts:
+                raise
+            print(
+                f"Proxy download attempt {attempt}/{attempts} failed: {exc!r}; retrying",
+                flush=True,
+            )
+            time.sleep(retry_delay_sec)
 
 
-def source_duration(row: dict[str, str], durations: dict[str, float], source_path: Path, dry_run: bool) -> float:
+def expected_source_duration(row: dict[str, str], durations: dict[str, float]) -> float | None:
     for key in ("duration_sec", "source_duration_sec"):
         value = row.get(key) or ""
         if value:
@@ -427,9 +458,33 @@ def source_duration(row: dict[str, str], durations: dict[str, float], source_pat
     video_id = source_video_id(row)
     if video_id in durations:
         return durations[video_id]
-    if source_path.exists() and not dry_run:
-        return ffprobe_duration(source_path)
-    raise RuntimeError(f"Cannot determine duration for {video_id}; provide metadata or local proxy file")
+    return None
+
+
+def source_duration(
+    row: dict[str, str],
+    durations: dict[str, float],
+    source_path: Path,
+    dry_run: bool,
+    max_error_sec: float = DEFAULT_MAX_SOURCE_DURATION_ERROR_SEC,
+    ffmpeg_bin: str = "ffmpeg",
+) -> float:
+    expected = expected_source_duration(row, durations)
+    video_id = source_video_id(row)
+    if dry_run:
+        if expected is None:
+            raise RuntimeError(f"Cannot determine duration for {video_id}; provide metadata")
+        return expected
+    if not source_path.exists():
+        raise RuntimeError(f"source proxy missing: {source_path}")
+    actual = ffmpeg_container_duration(source_path, ffmpeg_bin)
+    if expected is not None and abs(actual - expected) > max_error_sec:
+        raise RuntimeError(
+            "Source proxy duration mismatch: "
+            f"video={video_id} expected={fmt_float(expected)}s actual={fmt_float(actual)}s "
+            f"error={fmt_float(abs(actual - expected))}s limit={fmt_float(max_error_sec)}s"
+        )
+    return actual
 
 
 def process_session(
@@ -454,7 +509,13 @@ def process_session(
     duration_sec = end_sec - start_sec
 
     if not source_path.exists() and args.download_missing_source:
-        download_source_proxy(row, source_path, args.dry_run)
+        download_source_proxy(
+            row,
+            source_path,
+            args.dry_run,
+            attempts=args.download_attempts,
+            retry_delay_sec=args.download_retry_delay_sec,
+        )
     if not args.dry_run and not source_path.exists():
         raise RuntimeError(f"source proxy missing: {source_path}")
     validated_session_ids = getattr(args, "validated_session_ids", set())
@@ -573,6 +634,8 @@ def main() -> None:
     parser.add_argument("--metadata-csv", default=str(VIDEO_SUMMARY))
     parser.add_argument("--source-cache-root", help="Use this root for source proxy files instead of local_path from the URL CSV.")
     parser.add_argument("--download-missing-source", action="store_true", help="Download missing source proxy videos from signed_url before cutting.")
+    parser.add_argument("--download-attempts", type=int, default=DEFAULT_DOWNLOAD_ATTEMPTS)
+    parser.add_argument("--download-retry-delay-sec", type=float, default=3.0)
     parser.add_argument("--session-duration-sec", type=int, default=300)
     parser.add_argument("--min-tail-sec", type=int, default=60)
     parser.add_argument("--cos-config", default="~/.cos.conf")
@@ -593,6 +656,12 @@ def main() -> None:
         "--max-duration-error-sec",
         type=float,
         default=DEFAULT_MAX_DURATION_ERROR_SEC,
+    )
+    parser.add_argument(
+        "--max-source-duration-error-sec",
+        type=float,
+        default=DEFAULT_MAX_SOURCE_DURATION_ERROR_SEC,
+        help="Maximum allowed difference between source metadata and downloaded proxy duration.",
     )
     parser.add_argument("--ffmpeg-bin", help="Path to ffmpeg. Defaults to PATH, FFMPEG_BIN, then imageio-ffmpeg.")
     parser.add_argument("--ffprobe-bin", help="Path to ffprobe. Defaults to PATH or FFPROBE_BIN.")
@@ -618,6 +687,12 @@ def main() -> None:
         raise SystemExit("--reencode-crf must be between 0 and 51")
     if args.max_duration_error_sec < 0:
         raise SystemExit("--max-duration-error-sec must be >= 0")
+    if args.max_source_duration_error_sec < 0:
+        raise SystemExit("--max-source-duration-error-sec must be >= 0")
+    if args.download_attempts < 1:
+        raise SystemExit("--download-attempts must be >= 1")
+    if args.download_retry_delay_sec < 0:
+        raise SystemExit("--download-retry-delay-sec must be >= 0")
     if args.local_url_base and args.delete_session_after_upload:
         raise SystemExit("--delete-session-after-upload cannot be used with --local-url-base")
 
@@ -679,7 +754,69 @@ def main() -> None:
     total_planned = 0
     for row in selected:
         video_id = source_video_id(row)
-        duration = source_duration(row, durations, source_proxy_path(row, args), args.dry_run)
+        expected_duration = expected_source_duration(row, durations)
+        if expected_duration is not None:
+            expected_bounds = split_bounds(
+                expected_duration,
+                args.session_duration_sec,
+                args.min_tail_sec,
+            )
+            expected_ids = {
+                f"{video_id}_s{session_index:03d}"
+                for session_index in range(len(expected_bounds))
+            }
+            if expected_ids and expected_ids <= completed:
+                total_planned += len(expected_bounds)
+                print(
+                    f"\n{video_id}: all {len(expected_bounds)} sessions already completed; "
+                    "skipping source download",
+                    flush=True,
+                )
+                continue
+        source_path = source_proxy_path(row, args)
+        source_was_present = source_path.exists()
+        if not source_was_present and args.download_missing_source:
+            download_source_proxy(
+                row,
+                source_path,
+                args.dry_run,
+                attempts=args.download_attempts,
+                retry_delay_sec=args.download_retry_delay_sec,
+            )
+        try:
+            duration = source_duration(
+                row,
+                durations,
+                source_path,
+                args.dry_run,
+                args.max_source_duration_error_sec,
+                args.ffmpeg_bin,
+            )
+        except RuntimeError as exc:
+            if (
+                source_was_present
+                and args.download_missing_source
+                and str(exc).startswith("Source proxy duration mismatch:")
+            ):
+                print(f"Removing stale source proxy and downloading again: {source_path}", flush=True)
+                source_path.unlink(missing_ok=True)
+                download_source_proxy(
+                    row,
+                    source_path,
+                    args.dry_run,
+                    attempts=args.download_attempts,
+                    retry_delay_sec=args.download_retry_delay_sec,
+                )
+                duration = source_duration(
+                    row,
+                    durations,
+                    source_path,
+                    args.dry_run,
+                    args.max_source_duration_error_sec,
+                    args.ffmpeg_bin,
+                )
+            else:
+                raise
         bounds = split_bounds(duration, args.session_duration_sec, args.min_tail_sec)
         total_planned += len(bounds)
         print(f"\n{video_id}: duration={fmt_float(duration)}s sessions={len(bounds)}", flush=True)

@@ -244,6 +244,104 @@ def require_validation_complete(report_path: Path, expected: int, label: str) ->
         raise RuntimeError(f"{label}: validation incomplete {actual}; expected {expected} accepted records")
 
 
+def blocking_validation_record_ids(issues_path: Path) -> set[str]:
+    with issues_path.open(newline="", encoding="utf-8") as handle:
+        return {
+            row["record_id"]
+            for row in csv.DictReader(handle)
+            if row.get("severity") == "blocking" and row.get("record_id")
+        }
+
+
+def validation_retry_feedback(issues_path: Path, record_ids: set[str]) -> str:
+    with issues_path.open(newline="", encoding="utf-8") as handle:
+        rows = [
+            row
+            for row in csv.DictReader(handle)
+            if row.get("severity") == "blocking" and row.get("record_id") in record_ids
+        ]
+    details = "; ".join(
+        f"{row.get('record_id')}:{row.get('code')}:{row.get('message')}"
+        for row in rows[:20]
+    )
+    return (
+        "上一次输出未通过硬性结构校验。请重新观察或聚合输入并完整重写 JSON，"
+        "不要复制上一次的错误。必须修复以下问题："
+        + details
+    )
+
+
+def archive_validation_retry_outputs(
+    output_dir: Path,
+    record_ids: set[str],
+    retry_number: int,
+) -> None:
+    archive_dir = output_dir / "validation_retries" / f"retry_{retry_number:02d}"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    for record_id in sorted(record_ids):
+        for suffix in (".json", ".clean.json", ".repair.json"):
+            source = output_dir / f"{record_id}{suffix}"
+            if source.exists():
+                source.replace(archive_dir / source.name)
+
+
+def run_validation_until_complete(
+    *,
+    label: str,
+    output_dir: Path,
+    validation_dir: Path,
+    expected_ids: set[str],
+    attempts: int,
+    validation_command: list[str],
+    inference_command: list[str],
+    final_max_tokens: int | None = None,
+    runner: Callable[[list[str]], None],
+) -> None:
+    expected = len(expected_ids)
+    for retry_number in range(0, attempts + 1):
+        runner(validation_command)
+        report_path = validation_dir / "report.json"
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        actual = {key: int(report.get(key, -1)) for key in ("records", "accepted", "rejected")}
+        print(f"{label}: validation={actual}, expected={expected}", flush=True)
+        if actual == {"records": expected, "accepted": expected, "rejected": 0}:
+            return
+        if retry_number >= attempts:
+            raise RuntimeError(
+                f"{label}: validation incomplete {actual} after {attempts} retries; "
+                f"expected {expected} accepted records"
+            )
+
+        issues_path = validation_dir / "issues.csv"
+        retry_ids = blocking_validation_record_ids(issues_path)
+        unexpected = sorted(retry_ids - expected_ids)
+        if unexpected:
+            raise RuntimeError(
+                f"{label}: validation reported unknown record ids: {', '.join(unexpected[:20])}"
+            )
+        if not retry_ids:
+            raise RuntimeError(f"{label}: validation rejected records without blocking issue ids")
+
+        print(
+            f"{label}: validation retry {retry_number + 1}/{attempts}, "
+            f"records={','.join(sorted(retry_ids))}",
+            flush=True,
+        )
+        archive_validation_retry_outputs(output_dir, retry_ids, retry_number + 1)
+        retry_command = list(inference_command)
+        if final_max_tokens is not None and retry_number + 1 == attempts:
+            retry_command = replace_command_option(
+                retry_command,
+                "--max-tokens",
+                str(final_max_tokens),
+            )
+        retry_command.extend(
+            ["--prompt-suffix", validation_retry_feedback(issues_path, retry_ids)]
+        )
+        retry_command.extend(["--record-ids", ",".join(sorted(retry_ids)), "--overwrite"])
+        runner(retry_command)
+
+
 def check_url(url: str, timeout: float = 5.0) -> bool:
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
@@ -341,6 +439,28 @@ def extract_participant(
 
     expected_micro_ids = csv_record_ids(micro_csv, "session_id")
     expected_micro = len(expected_micro_ids)
+    micro_inference_command = [
+        args.python,
+        "scripts/qwen_video_batch.py",
+        "--base-url",
+        args.base_url,
+        "--model",
+        args.model,
+        "--signed-url-csv",
+        str(micro_csv),
+        "--prompt-file",
+        "prompts/video_micro_evidence_schema_zh.txt",
+        "--output-dir",
+        str(micro_output),
+        "--fps",
+        "1",
+        "--max-tokens",
+        "4096",
+        "--temperature",
+        "0",
+        "--extra-body-json",
+        '{"chat_template_kwargs":{"enable_thinking":false}}',
+    ]
     run_until_clean(
         label=f"{participant} micro",
         output_dir=micro_output,
@@ -349,45 +469,32 @@ def extract_participant(
         attempts=args.attempts,
         final_max_tokens=8192,
         runner=command_runner,
-        command=[
-            args.python,
-            "scripts/qwen_video_batch.py",
-            "--base-url",
-            args.base_url,
-            "--model",
-            args.model,
-            "--signed-url-csv",
-            str(micro_csv),
-            "--prompt-file",
-            "prompts/video_micro_evidence_schema_zh.txt",
-            "--output-dir",
-            str(micro_output),
-            "--fps",
-            "1",
-            "--max-tokens",
-            "4096",
-            "--temperature",
-            "0",
-            "--extra-body-json",
-            '{"chat_template_kwargs":{"enable_thinking":false}}',
-        ],
+        command=micro_inference_command,
     )
 
     micro_validation = qc_root / "validation/micro"
-    command_runner(
-        [
-            args.python,
-            "scripts/validate_hierarchical_evidence.py",
-            "micro",
-            "--input-dir",
-            str(micro_output),
-            "--metadata",
-            str(micro_csv),
-            "--output-dir",
-            str(micro_validation),
-        ]
+    micro_validation_command = [
+        args.python,
+        "scripts/validate_hierarchical_evidence.py",
+        "micro",
+        "--input-dir",
+        str(micro_output),
+        "--metadata",
+        str(micro_csv),
+        "--output-dir",
+        str(micro_validation),
+    ]
+    run_validation_until_complete(
+        label=f"{participant} micro",
+        output_dir=micro_output,
+        validation_dir=micro_validation,
+        expected_ids=expected_micro_ids,
+        attempts=args.attempts,
+        validation_command=micro_validation_command,
+        inference_command=micro_inference_command,
+        final_max_tokens=8192,
+        runner=command_runner,
     )
-    require_validation_complete(micro_validation / "report.json", expected_micro, f"{participant} micro")
 
     command_runner(
         [
@@ -412,6 +519,26 @@ def extract_participant(
 
     expected_window_ids = jsonl_record_ids(window_input)
     expected_window = len(expected_window_ids)
+    window_inference_command = [
+        args.python,
+        "scripts/qwen_text_jsonl_batch.py",
+        "--base-url",
+        args.base_url,
+        "--model",
+        args.model,
+        "--input-jsonl",
+        str(window_input),
+        "--prompt-file",
+        "prompts/video_window_aggregation_schema_zh.txt",
+        "--output-dir",
+        str(window_output),
+        "--max-tokens",
+        "8192",
+        "--temperature",
+        "0",
+        "--extra-body-json",
+        '{"chat_template_kwargs":{"enable_thinking":false}}',
+    ]
     run_until_clean(
         label=f"{participant} window",
         output_dir=window_output,
@@ -420,43 +547,32 @@ def extract_participant(
         attempts=args.attempts,
         final_max_tokens=24576,
         runner=command_runner,
-        command=[
-            args.python,
-            "scripts/qwen_text_jsonl_batch.py",
-            "--base-url",
-            args.base_url,
-            "--model",
-            args.model,
-            "--input-jsonl",
-            str(window_input),
-            "--prompt-file",
-            "prompts/video_window_aggregation_schema_zh.txt",
-            "--output-dir",
-            str(window_output),
-            "--max-tokens",
-            "8192",
-            "--temperature",
-            "0",
-            "--extra-body-json",
-            '{"chat_template_kwargs":{"enable_thinking":false}}',
-        ],
+        command=window_inference_command,
     )
 
     window_validation = qc_root / "validation/window"
-    command_runner(
-        [
-            args.python,
-            "scripts/validate_hierarchical_evidence.py",
-            "window",
-            "--input-dir",
-            str(window_output),
-            "--metadata",
-            str(window_input),
-            "--output-dir",
-            str(window_validation),
-        ]
+    window_validation_command = [
+        args.python,
+        "scripts/validate_hierarchical_evidence.py",
+        "window",
+        "--input-dir",
+        str(window_output),
+        "--metadata",
+        str(window_input),
+        "--output-dir",
+        str(window_validation),
+    ]
+    run_validation_until_complete(
+        label=f"{participant} window",
+        output_dir=window_output,
+        validation_dir=window_validation,
+        expected_ids=expected_window_ids,
+        attempts=args.attempts,
+        validation_command=window_validation_command,
+        inference_command=window_inference_command,
+        final_max_tokens=24576,
+        runner=command_runner,
     )
-    require_validation_complete(window_validation / "report.json", expected_window, f"{participant} window")
 
     command_runner(
         [
@@ -474,6 +590,26 @@ def extract_participant(
 
     expected_session_ids = jsonl_record_ids(session_input)
     expected_session = len(expected_session_ids)
+    session_inference_command = [
+        args.python,
+        "scripts/qwen_text_jsonl_batch.py",
+        "--base-url",
+        args.base_url,
+        "--model",
+        args.model,
+        "--input-jsonl",
+        str(session_input),
+        "--prompt-file",
+        "prompts/video_session_aggregation_schema_zh.txt",
+        "--output-dir",
+        str(session_output),
+        "--max-tokens",
+        "16384",
+        "--temperature",
+        "0",
+        "--extra-body-json",
+        '{"chat_template_kwargs":{"enable_thinking":false}}',
+    ]
     run_until_clean(
         label=f"{participant} session",
         output_dir=session_output,
@@ -482,43 +618,32 @@ def extract_participant(
         attempts=args.attempts,
         final_max_tokens=24576,
         runner=command_runner,
-        command=[
-            args.python,
-            "scripts/qwen_text_jsonl_batch.py",
-            "--base-url",
-            args.base_url,
-            "--model",
-            args.model,
-            "--input-jsonl",
-            str(session_input),
-            "--prompt-file",
-            "prompts/video_session_aggregation_schema_zh.txt",
-            "--output-dir",
-            str(session_output),
-            "--max-tokens",
-            "16384",
-            "--temperature",
-            "0",
-            "--extra-body-json",
-            '{"chat_template_kwargs":{"enable_thinking":false}}',
-        ],
+        command=session_inference_command,
     )
 
     session_validation = qc_root / "validation/session"
-    command_runner(
-        [
-            args.python,
-            "scripts/validate_hierarchical_evidence.py",
-            "session",
-            "--input-dir",
-            str(session_output),
-            "--metadata",
-            str(session_input),
-            "--output-dir",
-            str(session_validation),
-        ]
+    session_validation_command = [
+        args.python,
+        "scripts/validate_hierarchical_evidence.py",
+        "session",
+        "--input-dir",
+        str(session_output),
+        "--metadata",
+        str(session_input),
+        "--output-dir",
+        str(session_validation),
+    ]
+    run_validation_until_complete(
+        label=f"{participant} session",
+        output_dir=session_output,
+        validation_dir=session_validation,
+        expected_ids=expected_session_ids,
+        attempts=args.attempts,
+        validation_command=session_validation_command,
+        inference_command=session_inference_command,
+        final_max_tokens=24576,
+        runner=command_runner,
     )
-    require_validation_complete(session_validation / "report.json", expected_session, f"{participant} session")
     print(
         f"{participant} COMPLETE: micro={expected_micro} window={expected_window} session={expected_session}",
         flush=True,

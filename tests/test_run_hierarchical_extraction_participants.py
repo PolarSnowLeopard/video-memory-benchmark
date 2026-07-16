@@ -18,6 +18,7 @@ from scripts.run_hierarchical_extraction_participants import (  # noqa: E402
     http_server_serves_directory,
     pipeline_status_path,
     require_validation_complete,
+    run_validation_until_complete,
     run_until_clean,
     select_manifest_shard,
     upsert_pipeline_status,
@@ -177,6 +178,61 @@ class HierarchicalExtractionParticipantTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "expected 10"):
                 require_validation_complete(report, expected=10, label="P01 micro")
+
+    def test_validation_retry_archives_and_overwrites_only_rejected_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "outputs"
+            validation = root / "validation"
+            output.mkdir()
+            validation.mkdir()
+            (output / "bad.json").write_text("{}", encoding="utf-8")
+            (output / "bad.clean.json").write_text("{}", encoding="utf-8")
+            validation_runs = 0
+            calls: list[list[str]] = []
+
+            def runner(command: list[str]) -> None:
+                nonlocal validation_runs
+                calls.append(command)
+                if command[0] == "validate":
+                    validation_runs += 1
+                    accepted = 0 if validation_runs == 1 else 1
+                    (validation / "report.json").write_text(
+                        json.dumps(
+                            {
+                                "records": 1,
+                                "accepted": accepted,
+                                "rejected": 1 - accepted,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    (validation / "issues.csv").write_text(
+                        "record_id,severity\nbad,blocking\n" if accepted == 0 else "record_id,severity\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    (output / "bad.json").write_text("{}", encoding="utf-8")
+                    (output / "bad.clean.json").write_text("{}", encoding="utf-8")
+
+            run_validation_until_complete(
+                label="micro",
+                output_dir=output,
+                validation_dir=validation,
+                expected_ids={"bad"},
+                attempts=2,
+                validation_command=["validate"],
+                inference_command=["infer", "--max-tokens", "10"],
+                final_max_tokens=20,
+                runner=runner,
+            )
+
+            retry_call = next(call for call in calls if call[0] == "infer")
+            self.assertEqual(retry_call[-3:], ["--record-ids", "bad", "--overwrite"])
+            self.assertIn("--record-ids", retry_call)
+            self.assertTrue(
+                (output / "validation_retries/retry_01/bad.clean.json").exists()
+            )
 
 
 if __name__ == "__main__":

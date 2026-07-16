@@ -8,10 +8,18 @@ import configparser
 import csv
 import hashlib
 import mimetypes
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
+
+
+DEFAULT_MAX_PROXY_DURATION_ERROR_SEC = 1.0
+FFMPEG_DURATION_RE = re.compile(
+    r"Duration:\s*(\d+):([0-5]\d):([0-5]\d(?:\.\d+)?)"
+)
 
 
 STATUS_FIELDS = [
@@ -25,7 +33,11 @@ STATUS_FIELDS = [
     "raw_md5_ok",
     "proxy_path",
     "proxy_size_bytes",
+    "proxy_duration_sec",
+    "proxy_duration_error_sec",
+    "proxy_duration_validated",
     "cos_key",
+    "cos_size_verified",
     "raw_deleted",
     "proxy_deleted",
 ]
@@ -110,6 +122,34 @@ def run(cmd: list[str], cwd: Path | None = None, dry_run: bool = False) -> None:
     subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
 
 
+def parse_ffmpeg_duration(output: str) -> float:
+    match = FFMPEG_DURATION_RE.search(output)
+    if match is None:
+        raise ValueError("Could not parse container duration from ffmpeg output")
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def media_duration(path: Path, ffmpeg_bin: str = "ffmpeg") -> float:
+    result = subprocess.run(
+        [ffmpeg_bin, "-hide_banner", "-i", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    return parse_ffmpeg_duration(result.stderr)
+
+
+def validate_proxy_duration(actual_sec: float, expected_sec: float, max_error_sec: float) -> float:
+    error_sec = abs(actual_sec - expected_sec)
+    if error_sec > max_error_sec:
+        raise RuntimeError(
+            "Proxy duration mismatch: "
+            f"expected={expected_sec:.3f}s actual={actual_sec:.3f}s "
+            f"error={error_sec:.3f}s limit={max_error_sec:.3f}s"
+        )
+    return error_sec
+
+
 def download_video(
     python: str,
     downloader_dir: Path,
@@ -134,6 +174,8 @@ def download_video(
 
 def transcode_proxy(raw_path: Path, proxy_path: Path, ffmpeg_threads: int, dry_run: bool) -> None:
     proxy_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = proxy_path.with_name(f"{proxy_path.stem}.part{proxy_path.suffix}")
+    temp_path.unlink(missing_ok=True)
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -167,10 +209,16 @@ def transcode_proxy(raw_path: Path, proxy_path: Path, ffmpeg_threads: int, dry_r
             "64k",
             "-movflags",
             "+faststart",
-            str(proxy_path),
+            str(temp_path),
         ]
     )
-    run(cmd, dry_run=dry_run)
+    try:
+        run(cmd, dry_run=dry_run)
+        if not dry_run:
+            temp_path.replace(proxy_path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
 
 
 def read_cos_config(path: Path) -> dict[str, str]:
@@ -210,7 +258,21 @@ def content_type_for(path: Path) -> str:
     return guessed or "application/octet-stream"
 
 
-def upload_proxy(client, cos: dict[str, str], path: Path, key: str, url_expire_days: int, dry_run: bool) -> str:
+def response_content_length(response: dict[str, Any]) -> int | None:
+    for key, value in response.items():
+        if key.lower().replace("-", "") == "contentlength":
+            return int(value)
+    return None
+
+
+def upload_proxy(
+    client,
+    cos: dict[str, str],
+    path: Path,
+    key: str,
+    url_expire_days: int,
+    dry_run: bool,
+) -> tuple[str, bool]:
     bucket = cos["bucket"]
     if not dry_run:
         print(f"Uploading {path} -> cos://{bucket}/{key}", flush=True)
@@ -222,14 +284,26 @@ def upload_proxy(client, cos: dict[str, str], path: Path, key: str, url_expire_d
             MAXThread=8,
             EnableMD5=True,
         )
-        return client.get_presigned_url(
+        head = client.head_object(Bucket=bucket, Key=key)
+        remote_size = response_content_length(head)
+        local_size = path.stat().st_size
+        if remote_size is None:
+            raise RuntimeError(f"COS HEAD response has no Content-Length for {key}")
+        if remote_size != local_size:
+            raise RuntimeError(
+                f"COS size mismatch for {key}: local={local_size}, remote={remote_size}"
+            )
+        signed_url = client.get_presigned_url(
             Bucket=bucket,
             Key=key,
             Method="GET",
             Expired=url_expire_days * 24 * 3600,
         )
+        if not signed_url:
+            raise RuntimeError(f"COS client returned an empty signed URL for {key}")
+        return signed_url, True
     print(f"Would upload {path} -> cos://{bucket}/{key}", flush=True)
-    return ""
+    return "", False
 
 
 def delete_file(path: Path, label: str, dry_run: bool) -> bool:
@@ -295,16 +369,37 @@ def process_one(
     if not args.dry_run and not proxy_path.exists():
         raise RuntimeError(f"proxy video missing after transcode: {proxy_path}")
 
+    proxy_duration_sec: float | None = None
+    proxy_duration_error_sec: float | None = None
+    if not args.dry_run:
+        expected_duration_sec = float(row.get("duration_sec") or 0)
+        if expected_duration_sec <= 0:
+            raise RuntimeError(f"Missing expected duration for proxy validation: {video_id}")
+        proxy_duration_sec = media_duration(proxy_path)
+        proxy_duration_error_sec = validate_proxy_duration(
+            proxy_duration_sec,
+            expected_duration_sec,
+            args.max_proxy_duration_error_sec,
+        )
+
     raw_size_bytes = str(raw_path.stat().st_size if raw_path.exists() else "")
     proxy_size_bytes = str(proxy_path.stat().st_size if proxy_path.exists() else "")
     raw_deleted = False
     proxy_deleted = False
 
     signed_url = ""
+    cos_size_verified = False
     if not args.skip_upload:
         if cos_client is None or cos is None:
             raise RuntimeError("COS client is not available")
-        signed_url = upload_proxy(cos_client, cos, proxy_path, cos_key, args.url_expire_days, args.dry_run)
+        signed_url, cos_size_verified = upload_proxy(
+            cos_client,
+            cos,
+            proxy_path,
+            cos_key,
+            args.url_expire_days,
+            args.dry_run,
+        )
         url_row = {
             "participant_id": participant,
             "video_id": video_id,
@@ -335,7 +430,11 @@ def process_one(
         "raw_md5_ok": "" if raw_md5_ok is None else str(raw_md5_ok),
         "proxy_path": str(proxy_path),
         "proxy_size_bytes": proxy_size_bytes,
+        "proxy_duration_sec": "" if proxy_duration_sec is None else f"{proxy_duration_sec:.3f}",
+        "proxy_duration_error_sec": "" if proxy_duration_error_sec is None else f"{proxy_duration_error_sec:.3f}",
+        "proxy_duration_validated": str(proxy_duration_sec is not None),
         "cos_key": "" if args.skip_upload else cos_key,
+        "cos_size_verified": str(cos_size_verified),
         "raw_deleted": str(raw_deleted),
         "proxy_deleted": str(proxy_deleted),
     }
@@ -353,6 +452,11 @@ def main() -> None:
     parser.add_argument("--video-ids", help="Comma-separated subset from manifest")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--overwrite-proxy", action="store_true")
+    parser.add_argument(
+        "--max-proxy-duration-error-sec",
+        type=float,
+        default=DEFAULT_MAX_PROXY_DURATION_ERROR_SEC,
+    )
     parser.add_argument("--ffmpeg-threads", type=int, default=0, help="Threads per ffmpeg transcode. 0 lets ffmpeg choose.")
     parser.add_argument("--skip-upload", action="store_true")
     parser.add_argument(
@@ -373,6 +477,8 @@ def main() -> None:
     args.manifest = Path(args.manifest)
     if args.ffmpeg_threads < 0:
         raise SystemExit("--ffmpeg-threads must be >= 0")
+    if args.max_proxy_duration_error_sec < 0:
+        raise SystemExit("--max-proxy-duration-error-sec must be >= 0")
     args.data_root = Path(args.data_root)
     args.raw_root = args.data_root / "raw"
     args.proxy_root = args.data_root / "proxy"
@@ -420,7 +526,11 @@ def main() -> None:
                 "raw_md5_ok": "",
                 "proxy_path": "",
                 "proxy_size_bytes": "",
+                "proxy_duration_sec": "",
+                "proxy_duration_error_sec": "",
+                "proxy_duration_validated": "False",
                 "cos_key": "",
+                "cos_size_verified": "False",
                 "raw_deleted": "",
                 "proxy_deleted": "",
             }

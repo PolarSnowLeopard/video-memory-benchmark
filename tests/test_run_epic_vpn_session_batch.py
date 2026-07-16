@@ -5,10 +5,13 @@ from pathlib import Path
 
 from scripts.run_epic_vpn_session_batch import (
     DEFAULT_CUT_MODE,
+    DEFAULT_DOWNLOAD_ATTEMPTS,
     DEFAULT_MAX_DURATION_ERROR_SEC,
+    DEFAULT_MAX_SOURCE_DURATION_ERROR_SEC,
     DEFAULT_REENCODE_CRF,
     benchmark_order_metadata,
     completed_session_ids,
+    expected_source_duration,
     parse_ffmpeg_duration,
     remove_csv_row,
     validate_session_duration,
@@ -20,6 +23,17 @@ class SessionBatchTests(unittest.TestCase):
         self.assertEqual(DEFAULT_CUT_MODE, "reencode")
         self.assertEqual(DEFAULT_REENCODE_CRF, 23)
         self.assertEqual(DEFAULT_MAX_DURATION_ERROR_SEC, 0.25)
+        self.assertEqual(DEFAULT_MAX_SOURCE_DURATION_ERROR_SEC, 1.0)
+        self.assertEqual(DEFAULT_DOWNLOAD_ATTEMPTS, 3)
+
+    def test_expected_source_duration_prefers_manifest(self) -> None:
+        self.assertEqual(
+            expected_source_duration(
+                {"video_id": "P01_01", "duration_sec": "12.5"},
+                {"P01_01": 99.0},
+            ),
+            12.5,
+        )
 
     def test_preserves_benchmark_order_metadata(self) -> None:
         self.assertEqual(

@@ -295,6 +295,48 @@ micro 校验通过并构建 window 输入后，默认删除该参与者在集群
 精确切片模式不会上传临时 30 秒片段，因此启动新版全量抽取前无需删除 COS 中的旧片段。
 不得删除 `proxy_540p16` 源代理视频；旧 `sessions_30s` 只能在审计和新旧对比结束后单独清理。
 
+切片前会将下载后的代理视频时长与源数据元信息比较，默认最大误差为 1 秒。
+时长不符的本地缓存会被删除并重新下载一次；重新下载后仍不符则停止，
+不会将截断视频误当作完整 session。下载默认尝试 3 次，并校验 HTTP
+`Content-Length`。
+
+任一层的 clean JSON 如被硬校验拒绝，编排器会将原始输出移入
+`validation_retries/retry_XX/`，将具体校验错误追加到重试提示词，并且只覆盖重抽
+被拒绝的记录。其他已通过记录不会重算。
+
+### 8.1 修复被截断的源代理视频
+
+在 VPN 上按原参与者清单定点重新下载原视频、转码和覆盖同一 COS 对象：
+
+```bash
+cd /home/lighthouse/video-memory-benchmark
+git pull --ff-only
+
+for video_id in P02_06 P03_09 P04_05 P21_03 P22_03 P26_123 P28_17; do
+  participant="${video_id%%_*}"
+  participant_lower="$(printf '%s' "$participant" | tr '[:upper:]' '[:lower:]')"
+
+  python3 scripts/run_epic_vpn_batch.py \
+    --manifest "data/processed/epic_kitchens_100/manifests/queue/${participant_lower}_all_videos.csv" \
+    --video-ids "$video_id" \
+    --data-root /home/lighthouse/video-benchmark/data \
+    --downloader-dir /home/lighthouse/video-benchmark/data/external/epic-kitchens-download-scripts-100 \
+    --python python3 \
+    --cos-prefix video-benchmark/epic-kitchens \
+    --url-expire-days 30 \
+    --ffmpeg-threads 2 \
+    --overwrite-proxy \
+    --rerun-completed \
+    --delete-raw-after-upload \
+    --delete-proxy-after-upload \
+    --fail-fast || exit 1
+done
+```
+
+转码使用临时文件，只有 ffmpeg 成功后才原子替换正式代理文件；上传前校验代理
+时长，上传后通过 COS HEAD 校验远端大小。覆盖使用原 COS key，因此未过期的
+旧签名 URL 仍可访问新对象。
+
 ## 9. 结果检查
 
 统计三层状态：
