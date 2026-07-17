@@ -347,3 +347,79 @@ $QC/final/finalization_report.json
 - 按候选类型分层的人工抽检精确率。
 
 当前本地干跑结果：594/594 个 micro、156/156 个 window、25/25 个 session 均可继续；206 条候选中 205 条进入百炼请求，1 条因实体引用断裂单独阻断。即使模拟百炼把 205 条候选全部判为支持，仍只有 98 条自动放行、107 条进入人工审核、1 条保持结构失败；P30_113 的刀具位置候选带有 `affected_by_uncertainty`，不会在第一轮自动放行。
+
+## 11. EPIC-KITCHENS-100 全量交接与质检
+
+37 个参与者完成抽取后，不要把 micro、window 和本地临时视频全部搬到百炼执行机。
+百炼完整视频质检只需要：
+
+- session 硬校验通过的 `*.clean.json`；
+- 每个参与者的 `session_inputs_30s_120s.jsonl`；
+- 37 份完整源代理视频清单。
+
+在集群执行以下命令。脚本会先要求参与者状态为 `37/37 ok`，再逐参与者核对
+代理清单、session 输入和已验收 session 输出的 source id 集合完全一致。任一缺失、
+重复或混入旧版记录都会阻止打包。
+
+```bash
+cd /workspace/video-memory-benchmark
+git pull --ff-only
+
+rm -rf /tmp/epic100_precise_v2_qc_bundle
+
+python3 scripts/prepare_full_qc_bundle.py \
+  --output-root outputs/epic_kitchens_100_precise_v2 \
+  --manifest-dir data/cluster_inputs/epic37_proxy_manifests \
+  --bundle-dir /tmp/epic100_precise_v2_qc_bundle \
+  --archive /tmp/epic100_precise_v2_qc_bundle.tar.gz \
+  --expected-participants 37
+
+cat /tmp/epic100_precise_v2_qc_bundle/bundle_report.json
+sha256sum /tmp/epic100_precise_v2_qc_bundle.tar.gz
+```
+
+将压缩包传到有 `~/.cos.conf` 和百炼密钥的本地机器，解压后刷新源代理视频签名。
+刷新签名只针对已有 COS 对象生成新的读取地址，不上传、不下载、也不复制视频。
+
+```bash
+PY=/Users/zhaofanyu/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3
+RUN=data/tmp/qc_runs/epic100_precise_v2_full_qc_20260718
+BUNDLE=$RUN/bundle
+
+mkdir -p "$RUN"
+tar -xzf data/tmp/transfers/epic100_precise_v2_qc_bundle.tar.gz -C "$RUN"
+mv "$RUN/epic100_precise_v2_qc_bundle" "$BUNDLE"
+
+$PY scripts/refresh_cos_signed_urls.py \
+  --input-csv "$BUNDLE/proxy_540p16_urls.csv" \
+  --output-csv "$BUNDLE/proxy_540p16_urls_fresh.csv" \
+  --cos-config ~/.cos.conf \
+  --url-expire-days 21
+```
+
+统一生成完整视频第一轮质检请求：
+
+```bash
+mkdir -p "$RUN/bailian_source"
+
+$PY scripts/build_bailian_qc_batch.py source \
+  --session-records "$BUNDLE/session_records" \
+  --session-input-jsonl "$BUNDLE/session_inputs_30s_120s.jsonl" \
+  --proxy-url-csv "$BUNDLE/proxy_540p16_urls_fresh.csv" \
+  --prompt-file prompts/video_candidate_verification_schema_zh.txt \
+  --output-jsonl "$RUN/bailian_source/requests.jsonl" \
+  --manifest-jsonl "$RUN/bailian_source/request_manifest.jsonl" \
+  --model qwen3.7-plus \
+  --fps 0.5 \
+  --max-tokens 8192
+
+wc -l "$RUN/bailian_source/requests.jsonl"
+wc -l "$RUN/bailian_source/request_manifest.jsonl"
+```
+
+`request_manifest.jsonl` 应覆盖 bundle 中的全部 source；仅当某个 source 的候选全部
+被 session 硬校验标记为 `schema_failed` 时，`requests.jsonl` 才会比 source 总数少。
+检查 `bundle_report.json` 的 `sources`、请求行数和候选数后，再按第 4 节提交唯一的
+source Batch。后续源质检合并、局部视频复核和最终定稿仍按第 5 至第 8 节执行，
+但 `PROXY_CSV` 使用刷新后的 `proxy_540p16_urls_fresh.csv`，临时 COS 前缀使用独立
+版本目录，例如 `video-benchmark/qc-temp/epic100-precise-v2-20260718`。
