@@ -17,6 +17,7 @@ from scripts.merge_bailian_qc_results import (  # noqa: E402
     merge_source_verdicts,
     parse_batch_output_line,
     prune_merged_outputs,
+    repair_unquoted_minute_second_values,
     reset_merge_outputs,
 )
 
@@ -105,6 +106,52 @@ class MergeBailianQcResultsTests(unittest.TestCase):
 
         self.assertEqual(custom_id, "P30_01")
         self.assertEqual(parsed, payload)
+
+    def test_repairs_unquoted_minute_second_values_in_time_fields(self) -> None:
+        text = """
+        {
+          "start_sec": 4:55.0,
+          "end_sec": 5:00,
+          "reason": "4:55.0 remains text"
+        }
+        """
+
+        repaired = repair_unquoted_minute_second_values(text)
+        parsed = json.loads(repaired)
+
+        self.assertEqual(parsed["start_sec"], 295.0)
+        self.assertEqual(parsed["end_sec"], 300)
+        self.assertEqual(parsed["reason"], "4:55.0 remains text")
+
+    def test_parse_batch_output_line_repairs_unquoted_minute_second_values(self) -> None:
+        line = {
+            "custom_id": "P30_01",
+            "response": {
+                "status_code": 200,
+                "body": {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"source_video_id":"P30_01",'
+                                    '"verification_results":[{'
+                                    '"candidate_id":"memcand_1",'
+                                    '"evidence_time_ranges":[{'
+                                    '"start_sec":4:55.0,"end_sec":5:00}]}]}'
+                                )
+                            }
+                        }
+                    ]
+                },
+            },
+            "error": None,
+        }
+
+        custom_id, parsed = parse_batch_output_line(line)
+
+        self.assertEqual(custom_id, "P30_01")
+        time_range = parsed["verification_results"][0]["evidence_time_ranges"][0]
+        self.assertEqual(time_range, {"start_sec": 295.0, "end_sec": 300})
 
     def test_merge_routes_contradicted_and_insufficient_to_local_review(self) -> None:
         session = session_with_candidates([candidate("memcand_1"), candidate("memcand_2")])

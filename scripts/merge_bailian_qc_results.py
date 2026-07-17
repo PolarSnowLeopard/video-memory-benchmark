@@ -19,6 +19,9 @@ except ModuleNotFoundError:  # Direct execution via `python3 scripts/...`.
 
 
 FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+UNQUOTED_MINUTE_SECOND_RE = re.compile(
+    r'("(?:start_sec|end_sec)"\s*:\s*)(\d+):(\d{1,2}(?:\.\d+)?)'
+)
 VERDICTS = {"entailed", "contradicted", "insufficient"}
 BLOCKING_FLAGS = {
     "long_term_overclaim",
@@ -59,6 +62,21 @@ def extract_json_text(text: str) -> str:
     raise ValueError("No JSON object found in assistant content")
 
 
+def repair_unquoted_minute_second_values(text: str) -> str:
+    """Convert unquoted MM:SS values only in numeric evidence-time fields."""
+
+    def replace(match: re.Match[str]) -> str:
+        minutes = int(match.group(2))
+        seconds = float(match.group(3))
+        if seconds >= 60:
+            return match.group(0)
+        total_seconds = minutes * 60 + seconds
+        value = f"{total_seconds:.6f}".rstrip("0").rstrip(".")
+        return f"{match.group(1)}{value}"
+
+    return UNQUOTED_MINUTE_SECOND_RE.sub(replace, text)
+
+
 def parse_batch_output_line(line: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     custom_id = str(line.get("custom_id") or "")
     if not custom_id:
@@ -77,7 +95,15 @@ def parse_batch_output_line(line: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     content = message.get("content") or message.get("reasoning")
     if not content:
         raise ValueError(f"Batch request {custom_id} has empty assistant content")
-    return custom_id, json.loads(extract_json_text(str(content)))
+    json_text = extract_json_text(str(content))
+    try:
+        payload = json.loads(json_text)
+    except json.JSONDecodeError:
+        repaired = repair_unquoted_minute_second_values(json_text)
+        if repaired == json_text:
+            raise
+        payload = json.loads(repaired)
+    return custom_id, payload
 
 
 def ranges_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:

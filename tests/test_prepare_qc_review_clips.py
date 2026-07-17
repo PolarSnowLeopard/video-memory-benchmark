@@ -15,6 +15,7 @@ from scripts.prepare_qc_review_clips import (  # noqa: E402
     delete_downloaded_sources,
     index_unique_rows,
     mapping_records,
+    release_source_after_spec,
 )
 
 
@@ -58,6 +59,39 @@ class PrepareQcReviewClipsTests(unittest.TestCase):
 
             self.assertTrue(existing.exists())
             self.assertFalse(downloaded.exists())
+
+    def test_downloaded_source_is_released_after_its_final_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "downloaded.mp4"
+            source.write_bytes(b"downloaded")
+            remaining = {"P30_01": 2}
+            source_paths = {"P30_01": source}
+            downloaded = {source}
+
+            self.assertFalse(
+                release_source_after_spec(
+                    "P30_01",
+                    remaining,
+                    source_paths,
+                    downloaded,
+                    delete_source_after=True,
+                    dry_run=False,
+                )
+            )
+            self.assertTrue(source.exists())
+            self.assertTrue(
+                release_source_after_spec(
+                    "P30_01",
+                    remaining,
+                    source_paths,
+                    downloaded,
+                    delete_source_after=True,
+                    dry_run=False,
+                )
+            )
+            self.assertFalse(source.exists())
+            self.assertNotIn("P30_01", source_paths)
+            self.assertEqual(downloaded, set())
 
     def test_script_help_runs_from_repository_root(self) -> None:
         result = subprocess.run(

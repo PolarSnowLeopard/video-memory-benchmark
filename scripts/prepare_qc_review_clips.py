@@ -9,6 +9,7 @@ import json
 import math
 import sys
 import urllib.request
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -215,6 +216,27 @@ def delete_downloaded_sources(paths: set[Path]) -> None:
             path.unlink()
 
 
+def release_source_after_spec(
+    source_id: str,
+    remaining_specs: dict[str, int],
+    source_paths: dict[str, Path],
+    downloaded_sources: set[Path],
+    delete_source_after: bool,
+    dry_run: bool,
+) -> bool:
+    """Release a run-downloaded proxy as soon as its final clip is processed."""
+
+    remaining_specs[source_id] -= 1
+    source_finished = remaining_specs[source_id] == 0
+    if not source_finished or not delete_source_after or dry_run:
+        return source_finished
+    source_path = source_paths.pop(source_id, None)
+    if source_path in downloaded_sources:
+        delete_downloaded_sources({source_path})
+        downloaded_sources.discard(source_path)
+    return source_finished
+
+
 def mapping_records(
     review_items: list[dict[str, Any]],
     mappings: dict[str, list[str]],
@@ -312,73 +334,92 @@ def main() -> None:
     source_paths: dict[str, Path] = {}
     downloaded_sources: set[Path] = set()
     output_rows: list[dict[str, Any]] = []
-    for spec in specs:
-        clip_id = spec["clip_id"]
-        existing = existing_rows.get(clip_id)
-        if existing and existing.get("signed_url") and not args.overwrite:
-            output_rows.append(existing)
-            continue
-        source_id = spec["source_video_id"]
-        source_row = proxy_rows.get(source_id)
-        if source_row is None:
-            raise ValueError(f"Missing source proxy row: {source_id}")
-        source_path = source_paths.get(source_id)
-        if source_path is None:
-            source_path, downloaded_by_run = ensure_source_proxy(
-                source_cache_root, source_row, source_id, args.dry_run
+    remaining_specs = Counter(str(spec["source_video_id"]) for spec in specs)
+    try:
+        for spec in specs:
+            clip_id = spec["clip_id"]
+            source_id = spec["source_video_id"]
+            existing = existing_rows.get(clip_id)
+            if existing and existing.get("signed_url") and not args.overwrite:
+                output_rows.append(existing)
+                release_source_after_spec(
+                    source_id,
+                    remaining_specs,
+                    source_paths,
+                    downloaded_sources,
+                    args.delete_source_after,
+                    args.dry_run,
+                )
+                continue
+            source_row = proxy_rows.get(source_id)
+            if source_row is None:
+                raise ValueError(f"Missing source proxy row: {source_id}")
+            source_path = source_paths.get(source_id)
+            if source_path is None:
+                source_path, downloaded_by_run = ensure_source_proxy(
+                    source_cache_root, source_row, source_id, args.dry_run
+                )
+                source_paths[source_id] = source_path
+                if downloaded_by_run:
+                    downloaded_sources.add(source_path)
+            clip_path = (
+                output_root
+                / spec["participant_id"]
+                / source_id
+                / f"{clip_id}_{int(spec['start_sec']):06d}_{int(spec['end_sec']):06d}.mp4"
             )
-            source_paths[source_id] = source_path
-            if downloaded_by_run:
-                downloaded_sources.add(source_path)
-        clip_path = (
-            output_root
-            / spec["participant_id"]
-            / source_id
-            / f"{clip_id}_{int(spec['start_sec']):06d}_{int(spec['end_sec']):06d}.mp4"
-        )
-        if args.overwrite or not clip_path.is_file():
-            cut_session(
-                source_path,
-                clip_path,
-                spec["start_sec"],
-                spec["duration_sec"],
-                cut_args,
+            if args.overwrite or not clip_path.is_file():
+                cut_session(
+                    source_path,
+                    clip_path,
+                    spec["start_sec"],
+                    spec["duration_sec"],
+                    cut_args,
+                )
+            key = (
+                f"{args.cos_prefix.strip('/')}/{spec['participant_id']}/{source_id}/{clip_path.name}"
             )
-        key = (
-            f"{args.cos_prefix.strip('/')}/{spec['participant_id']}/{source_id}/{clip_path.name}"
-        )
-        signed_url = ""
-        if args.upload:
-            signed_url = upload_session(
-                cos_client,
-                cos,
-                clip_path,
-                key,
-                args.url_expire_days,
+            signed_url = ""
+            if args.upload:
+                signed_url = upload_session(
+                    cos_client,
+                    cos,
+                    clip_path,
+                    key,
+                    args.url_expire_days,
+                    args.dry_run,
+                )
+            size_bytes = "" if args.dry_run or not clip_path.exists() else str(clip_path.stat().st_size)
+            row = {
+                **spec,
+                "candidate_ids": json.dumps(spec["candidate_ids"], ensure_ascii=False),
+                "local_path": str(clip_path),
+                "bucket": cos.get("bucket", ""),
+                "region": cos.get("region", ""),
+                "key": key if args.upload else "",
+                "size_bytes": size_bytes,
+                "content_type": content_type_for(clip_path),
+                "signed_url": signed_url,
+            }
+            output_rows.append(row)
+            if args.delete_local_after_upload and signed_url and clip_path.exists():
+                clip_path.unlink()
+            release_source_after_spec(
+                source_id,
+                remaining_specs,
+                source_paths,
+                downloaded_sources,
+                args.delete_source_after,
                 args.dry_run,
             )
-        size_bytes = "" if args.dry_run or not clip_path.exists() else str(clip_path.stat().st_size)
-        row = {
-            **spec,
-            "candidate_ids": json.dumps(spec["candidate_ids"], ensure_ascii=False),
-            "local_path": str(clip_path),
-            "bucket": cos.get("bucket", ""),
-            "region": cos.get("region", ""),
-            "key": key if args.upload else "",
-            "size_bytes": size_bytes,
-            "content_type": content_type_for(clip_path),
-            "signed_url": signed_url,
-        }
-        output_rows.append(row)
-        if args.delete_local_after_upload and signed_url and clip_path.exists():
-            clip_path.unlink()
+    finally:
+        if args.delete_source_after and not args.dry_run:
+            delete_downloaded_sources(downloaded_sources)
 
     write_csv(Path(args.output_url_csv), output_rows, URL_FIELDS)
     write_csv(Path(args.cleanup_csv), output_rows, URL_FIELDS)
     mapping_output = mapping_records(review_items, mappings, specs, args.clip_sec)
     write_jsonl(Path(args.mapping_jsonl), mapping_output)
-    if args.delete_source_after and not args.dry_run:
-        delete_downloaded_sources(downloaded_sources)
     print(
         f"Prepared clip_specs={len(specs)} review_items={len(review_items)} "
         f"sampled={sum(not item['clip_selection']['is_exhaustive'] for item in mapping_output)} "
