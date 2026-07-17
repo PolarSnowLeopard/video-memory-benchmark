@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 from scripts.prepare_qc_review_clips import (  # noqa: E402
     DEFAULT_CUT_MODE,
     DEFAULT_MAX_CLIPS_PER_CANDIDATE,
+    DEFAULT_MIN_TAIL_SEC,
     build_clip_specs,
     delete_downloaded_sources,
     index_unique_rows,
@@ -35,6 +36,7 @@ class PrepareQcReviewClipsTests(unittest.TestCase):
     def test_default_cut_mode_is_frame_accurate_reencode(self) -> None:
         self.assertEqual(DEFAULT_CUT_MODE, "reencode")
         self.assertEqual(DEFAULT_MAX_CLIPS_PER_CANDIDATE, 16)
+        self.assertEqual(DEFAULT_MIN_TAIL_SEC, 10.0)
 
     def test_duplicate_source_rows_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "Duplicate source proxy"):
@@ -132,6 +134,32 @@ class PrepareQcReviewClipsTests(unittest.TestCase):
                 "P30_01_qc_s00003",
             ],
         )
+
+    def test_short_tail_is_shifted_to_cover_source_end(self) -> None:
+        specs, mappings = build_clip_specs(
+            [review_item("memcand_1", 1080, 1141.76)],
+            clip_sec=30,
+            source_durations={"P30_01": 1141.76},
+            min_tail_sec=10,
+        )
+
+        self.assertEqual(len(specs), 3)
+        self.assertEqual(mappings["P30_01:memcand_1"][-1], "P30_01_qc_s00038")
+        self.assertAlmostEqual(specs[-1]["start_sec"], 1111.76)
+        self.assertAlmostEqual(specs[-1]["end_sec"], 1141.76)
+        self.assertAlmostEqual(specs[-1]["duration_sec"], 30.0)
+
+    def test_valid_tail_is_clamped_without_shifting(self) -> None:
+        specs, _ = build_clip_specs(
+            [review_item("memcand_1", 30, 74.875)],
+            clip_sec=30,
+            source_durations={"P30_01": 74.875},
+            min_tail_sec=10,
+        )
+
+        self.assertEqual(specs[-1]["start_sec"], 60.0)
+        self.assertEqual(specs[-1]["end_sec"], 74.875)
+        self.assertAlmostEqual(specs[-1]["duration_sec"], 14.875)
 
     def test_oversized_support_range_is_uniformly_sampled(self) -> None:
         item = review_item("memcand_1", 0, 3000)

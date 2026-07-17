@@ -48,6 +48,7 @@ URL_FIELDS = [
 ]
 DEFAULT_CUT_MODE = "reencode"
 DEFAULT_MAX_CLIPS_PER_CANDIDATE = 16
+DEFAULT_MIN_TAIL_SEC = 10.0
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -132,11 +133,16 @@ def build_clip_specs(
     review_items: list[dict[str, Any]],
     clip_sec: int = 30,
     max_clips_per_candidate: int = DEFAULT_MAX_CLIPS_PER_CANDIDATE,
+    source_durations: dict[str, float] | None = None,
+    min_tail_sec: float = DEFAULT_MIN_TAIL_SEC,
 ) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
     if clip_sec <= 0:
         raise ValueError("clip_sec must be > 0")
     if max_clips_per_candidate <= 0:
         raise ValueError("max_clips_per_candidate must be > 0")
+    if min_tail_sec < 0:
+        raise ValueError("min_tail_sec must be >= 0")
+    source_durations = source_durations or {}
     specs: dict[tuple[str, int], dict[str, Any]] = {}
     mappings: dict[str, list[str]] = {}
     for item in review_items:
@@ -154,6 +160,17 @@ def build_clip_specs(
             clip_id = f"{source_video_id}_qc_s{clip_index:05d}"
             key = (source_video_id, clip_index)
             if key not in specs:
+                start_sec = float(clip_index * clip_sec)
+                end_sec = float((clip_index + 1) * clip_sec)
+                source_duration = source_durations.get(source_video_id)
+                if source_duration is not None and end_sec > source_duration:
+                    end_sec = source_duration
+                    if end_sec - start_sec < min_tail_sec:
+                        start_sec = max(0.0, end_sec - clip_sec)
+                if end_sec <= start_sec:
+                    raise ValueError(
+                        f"Review clip starts beyond source duration: {clip_id}"
+                    )
                 specs[key] = {
                     "clip_id": clip_id,
                     "participant_id": str(
@@ -161,9 +178,9 @@ def build_clip_specs(
                     ),
                     "source_video_id": source_video_id,
                     "clip_index": clip_index,
-                    "start_sec": float(clip_index * clip_sec),
-                    "end_sec": float((clip_index + 1) * clip_sec),
-                    "duration_sec": float(clip_sec),
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                    "duration_sec": end_sec - start_sec,
                     "candidate_ids": [],
                 }
             if candidate_id not in specs[key]["candidate_ids"]:
@@ -174,6 +191,31 @@ def build_clip_specs(
     for spec in ordered:
         spec["candidate_ids"] = sorted(spec["candidate_ids"])
     return ordered, mappings
+
+
+def load_source_durations(path: Path | None) -> dict[str, float]:
+    if path is None:
+        return {}
+    durations: dict[str, float] = {}
+    for record in read_jsonl(path):
+        source_id = str(
+            record.get("source_video_id")
+            or record.get("session_id")
+            or record.get("record_id")
+            or ""
+        )
+        if not source_id:
+            raise ValueError("Source metadata record has no source video id")
+        if source_id in durations:
+            raise ValueError(f"Duplicate source duration: {source_id}")
+        try:
+            duration = float(record["duration_sec"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid source duration: {source_id}") from exc
+        if duration <= 0:
+            raise ValueError(f"Invalid source duration: {source_id}")
+        durations[source_id] = duration
+    return durations
 
 
 def source_cache_path(source_cache_root: Path, row: dict[str, str], source_id: str) -> Path:
@@ -283,7 +325,9 @@ def main() -> None:
     parser.add_argument("--output-url-csv", required=True)
     parser.add_argument("--mapping-jsonl", required=True)
     parser.add_argument("--cleanup-csv", required=True)
+    parser.add_argument("--source-metadata-jsonl")
     parser.add_argument("--clip-sec", type=int, default=30)
+    parser.add_argument("--min-tail-sec", type=float, default=DEFAULT_MIN_TAIL_SEC)
     parser.add_argument(
         "--max-clips-per-candidate",
         type=int,
@@ -307,7 +351,13 @@ def main() -> None:
 
     review_items = read_jsonl(Path(args.review_queue))
     specs, mappings = build_clip_specs(
-        review_items, args.clip_sec, args.max_clips_per_candidate
+        review_items,
+        args.clip_sec,
+        args.max_clips_per_candidate,
+        load_source_durations(
+            Path(args.source_metadata_jsonl) if args.source_metadata_jsonl else None
+        ),
+        args.min_tail_sec,
     )
     proxy_rows = index_unique_rows(
         read_csv(Path(args.proxy_url_csv)),
