@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.run_ego4d_vpn_participant_queue import (  # noqa: E402
     build_batch_command,
+    detect_source_auth_error,
     discover_manifests,
     output_url_csv,
     source_manifest_participant,
@@ -97,6 +98,41 @@ class Ego4DVpnParticipantQueueTests(unittest.TestCase):
             output_url_csv(Path("/data"), "EGO4D_P000007"),
             Path("/data/cos_urls/ego4d_p000007_all_videos_proxy_540p16_urls.csv"),
         )
+
+    def test_detects_ego4d_source_authorization_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "participant.log"
+            log.write_text(
+                "File \"/venv/site-packages/ego4d/cli/cli.py\"\n"
+                "botocore.exceptions.ClientError: An error occurred (403) when "
+                "calling the HeadObject operation: Forbidden\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                detect_source_auth_error(log),
+                "when calling the headobject operation: forbidden",
+            )
+
+            log.write_text(
+                "boto3 download failed: ExpiredToken\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(detect_source_auth_error(log), "expiredtoken")
+
+    def test_does_not_treat_normal_video_failure_as_global_auth_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "participant.log"
+            log.write_text(
+                "ERROR uid-1: Invalid proxy duration\n",
+                encoding="utf-8",
+            )
+            self.assertIsNone(detect_source_auth_error(log))
+
+            log.write_text(
+                "COS upload returned Forbidden without boto or Ego4D context\n",
+                encoding="utf-8",
+            )
+            self.assertIsNone(detect_source_auth_error(log))
 
 
 if __name__ == "__main__":

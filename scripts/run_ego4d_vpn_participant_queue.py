@@ -30,6 +30,23 @@ QUEUE_STATUS_FIELDS = [
     "log_path",
 ]
 
+SOURCE_AUTH_CONTEXT_MARKERS = (
+    "botocore.exceptions",
+    "boto3",
+    "s3transfer",
+)
+
+SOURCE_AUTH_ERROR_MARKERS = (
+    "when calling the headobject operation: forbidden",
+    "when calling the headobject operation: accessdenied",
+    "expiredtoken",
+    "invalidaccesskeyid",
+    "signaturedoesnotmatch",
+    "unrecognizedclientexception",
+    "the security token included in the request is expired",
+    "the aws access key id you provided does not exist",
+)
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -127,6 +144,26 @@ def completed_manifest_video_count(url_csv: Path, manifest: Path) -> int:
         if row.get("video_uid") and row.get("signed_url")
     }
     return len(expected & uploaded)
+
+
+def read_log_tail(path: Path, max_bytes: int = 1024 * 1024) -> str:
+    if not path.exists():
+        return ""
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        handle.seek(max(0, size - max_bytes))
+        return handle.read().decode("utf-8", errors="replace")
+
+
+def detect_source_auth_error(log_path: Path) -> str | None:
+    text = read_log_tail(log_path).casefold()
+    if not any(marker in text for marker in SOURCE_AUTH_CONTEXT_MARKERS):
+        return None
+    return next(
+        (marker for marker in SOURCE_AUTH_ERROR_MARKERS if marker in text),
+        None,
+    )
 
 
 def build_batch_command(manifest: Path, participant_id: str, args: argparse.Namespace) -> list[str]:
@@ -293,6 +330,7 @@ def main() -> None:
         return
 
     active: dict[str, dict[str, object]] = {}
+    fatal_auth_error: tuple[str, str] | None = None
 
     def handle_signal(signum, _frame) -> None:
         print(f"Received signal {signum}; terminating active workers.", flush=True)
@@ -365,6 +403,15 @@ def main() -> None:
                 Path(item["url_csv"]), Path(item["manifest"])
             )
             status = "ok" if returncode == 0 and uploaded == expected else "error"
+            auth_error = (
+                detect_source_auth_error(Path(item["log_path"]))
+                if returncode != 0
+                else None
+            )
+            if auth_error:
+                status = "source_auth_error"
+                if fatal_auth_error is None:
+                    fatal_auth_error = (participant_id, auth_error)
             print(
                 f"Finished {participant_id}: {status}; uploaded={uploaded}/{expected}; rc={returncode}",
                 flush=True,
@@ -390,6 +437,51 @@ def main() -> None:
             finished.append(participant_id)
         for participant_id in finished:
             active.pop(participant_id)
+        if fatal_auth_error is not None:
+            failed_participant, marker = fatal_auth_error
+            print(
+                "Fatal Ego4D source authorization failure detected for "
+                f"{failed_participant} ({marker}); stopping the queue.",
+                flush=True,
+            )
+            terminate_active(active)
+            for participant_id, item in active.items():
+                process = item["process"]
+                assert isinstance(process, subprocess.Popen)
+                process.wait()
+                log_file = item["log_file"]
+                log_file.write(
+                    f"[{utc_now()}] Aborted after source authorization failure "
+                    f"in {failed_participant}\n"
+                )
+                log_file.close()
+                expected = int(item["expected"])
+                uploaded = completed_manifest_video_count(
+                    Path(item["url_csv"]), Path(item["manifest"])
+                )
+                upsert_csv(
+                    queue_status,
+                    {
+                        "updated_at": utc_now(),
+                        "participant_id": participant_id,
+                        "status": "blocked_source_auth",
+                        "started_at": str(item["started_at"]),
+                        "finished_at": utc_now(),
+                        "returncode": str(process.returncode),
+                        "selected_videos": str(expected),
+                        "uploaded_videos": str(uploaded),
+                        "manifest": str(item["manifest"]),
+                        "url_csv": str(item["url_csv"]),
+                        "log_path": str(item["log_path"]),
+                    },
+                    QUEUE_STATUS_FIELDS,
+                    "participant_id",
+                )
+            active.clear()
+            raise SystemExit(
+                "Ego4D source authorization failed. Renew or replace the AWS "
+                "profile, validate one video, then rerun the same queue command."
+            )
         if pending or active:
             time.sleep(args.poll_seconds)
 
