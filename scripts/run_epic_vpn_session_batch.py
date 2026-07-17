@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 VIDEO_SUMMARY = ROOT / "data/processed/epic_kitchens_100/video_summary.csv"
 DEFAULT_CUT_MODE = "reencode"
 DEFAULT_REENCODE_CRF = 23
+DEFAULT_REENCODE_PRESET = "veryfast"
 DEFAULT_MAX_DURATION_ERROR_SEC = 0.25
 DEFAULT_MAX_SOURCE_DURATION_ERROR_SEC = 1.0
 DEFAULT_SOURCE_TAIL_PROBE_OFFSET_SEC = 5.0
@@ -374,7 +375,7 @@ def cut_session(source_path: Path, output_path: Path, start_sec: float, duration
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            str(getattr(args, "reencode_preset", DEFAULT_REENCODE_PRESET)),
             "-crf",
             str(getattr(args, "reencode_crf", DEFAULT_REENCODE_CRF)),
             "-pix_fmt",
@@ -707,6 +708,7 @@ def main() -> None:
         help="reencode is frame-accurate; copy may include adjacent GOP content.",
     )
     parser.add_argument("--reencode-crf", type=int, default=DEFAULT_REENCODE_CRF)
+    parser.add_argument("--reencode-preset", default=DEFAULT_REENCODE_PRESET)
     parser.add_argument(
         "--max-duration-error-sec",
         type=float,

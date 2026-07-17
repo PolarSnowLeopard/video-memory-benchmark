@@ -10,6 +10,7 @@ from scripts.run_epic_vpn_session_batch import (
     DEFAULT_MAX_DURATION_ERROR_SEC,
     DEFAULT_MAX_SOURCE_DURATION_ERROR_SEC,
     DEFAULT_REENCODE_CRF,
+    DEFAULT_REENCODE_PRESET,
     benchmark_order_metadata,
     completed_session_ids,
     expected_source_duration,
@@ -26,6 +27,7 @@ class SessionBatchTests(unittest.TestCase):
     def test_frame_accurate_defaults(self) -> None:
         self.assertEqual(DEFAULT_CUT_MODE, "reencode")
         self.assertEqual(DEFAULT_REENCODE_CRF, 23)
+        self.assertEqual(DEFAULT_REENCODE_PRESET, "veryfast")
         self.assertEqual(DEFAULT_MAX_DURATION_ERROR_SEC, 0.25)
         self.assertEqual(DEFAULT_MAX_SOURCE_DURATION_ERROR_SEC, 1.0)
         self.assertEqual(DEFAULT_DOWNLOAD_ATTEMPTS, 3)

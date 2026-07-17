@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.build_bailian_qc_batch import proxy_url, source_video_id_from_proxy_row
 from scripts.run_epic_vpn_session_batch import (
+    DEFAULT_REENCODE_PRESET,
     content_type_for,
     cut_session,
     make_cos_client,
@@ -292,6 +293,7 @@ def main() -> None:
     parser.add_argument(
         "--cut-mode", choices=["copy", "reencode"], default=DEFAULT_CUT_MODE
     )
+    parser.add_argument("--reencode-preset", default=DEFAULT_REENCODE_PRESET)
     parser.add_argument("--ffmpeg-threads", type=int, default=2)
     parser.add_argument("--upload", action="store_true")
     parser.add_argument("--cos-config", default="~/.cos.conf")
@@ -323,6 +325,7 @@ def main() -> None:
     cut_args = SimpleNamespace(
         ffmpeg_bin=ffmpeg_bin,
         cut_mode=args.cut_mode,
+        reencode_preset=args.reencode_preset,
         ffmpeg_threads=args.ffmpeg_threads,
         dry_run=args.dry_run,
     )
