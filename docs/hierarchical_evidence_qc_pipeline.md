@@ -44,6 +44,7 @@ ROOT=outputs/epic_kitchens_100
 QC=$ROOT/p30_qc
 MICRO_CSV=data/cos_urls/p30_all_videos_sessions_30s_urls.csv
 PROXY_CSV=data/cluster_inputs/p30_all_videos_proxy_540p16_urls.csv
+SESSION_INPUTS=$QC/hierarchical/session_inputs_30s_120s.jsonl
 
 mkdir -p "$QC"/{validation,hierarchical,bailian_source,bailian_local,review_clips,final}
 ```
@@ -239,14 +240,17 @@ python3 -m pip install -r requirements/vpn.txt
 python3 scripts/prepare_qc_review_clips.py \
   --review-queue "$QC/source_qc/local_review_queue.jsonl" \
   --proxy-url-csv "$PROXY_CSV" \
+  --source-metadata-jsonl "$SESSION_INPUTS" \
   --source-cache-root data/proxy_from_cos_qc \
   --output-root data/qc_review_clips \
   --output-url-csv "$QC/review_clips/clip_urls.csv" \
   --mapping-jsonl "$QC/review_clips/candidate_clip_mapping.jsonl" \
   --cleanup-csv "$QC/review_clips/cos_cleanup.csv" \
   --clip-sec 30 \
+  --min-tail-sec 10 \
   --max-clips-per-candidate 16 \
   --cut-mode reencode \
+  --reencode-preset ultrafast \
   --upload \
   --cos-config ~/.cos.conf \
   --cos-prefix video-benchmark/qc-temp/p30 \
@@ -255,7 +259,7 @@ python3 scripts/prepare_qc_review_clips.py \
   --delete-source-after
 ```
 
-同一个 30 秒区间被多个候选引用时只上传一次。单个候选覆盖超过 16 个网格时，按时间均匀选取 16 段，并在 `clip_selection` 中标记为非穷尽采样；局部复核不得依据未观察区间做否定结论。默认重编码以保证按帧精确切分；`--delete-source-after` 只删除本次运行临时下载的代理视频，不删除调用方原本就放在缓存目录中的文件。`cos_cleanup.csv` 是远端临时对象清理清单；建议为 `video-benchmark/qc-temp/` 配置对象存储生命周期，任务完成后按清单核对删除。
+同一个 30 秒区间被多个候选引用时只上传一次。单个候选覆盖超过 16 个网格时，按时间均匀选取 16 段，并在 `clip_selection` 中标记为非穷尽采样；局部复核不得依据未观察区间做否定结论。`--source-metadata-jsonl` 用真实源时长截断尾段；不足 10 秒的尾段会向前平移为覆盖视频结尾的 30 秒片段，避免百炼拒绝过短视频。`ultrafast` 只降低临时片段的压缩率，不改变逐帧重编码和精确边界。`--delete-source-after` 会在某个源视频的最后一个片段处理完后立即删除本次运行临时下载的代理视频，不删除调用方原本就放在缓存目录中的文件。`cos_cleanup.csv` 是远端临时对象清理清单；建议为 `video-benchmark/qc-temp/` 配置对象存储生命周期，任务完成后按清单核对删除。
 
 ## 7. 提交局部视频二次复核
 
@@ -440,7 +444,7 @@ python3 scripts/bailian_online_jsonl.py \
   --output-jsonl "$RUN/bailian_source_online/results.jsonl" \
   --error-jsonl "$RUN/bailian_source_online/errors.jsonl" \
   --max-workers 20 \
-  --rpm 300 \
+  --rpm 60 \
   --limit 20
 ```
 
@@ -448,3 +452,9 @@ python3 scripts/bailian_online_jsonl.py \
 完成时立即追加并同步到磁盘；重复运行会跳过已有成功 `custom_id`，失败项会重新请求。
 不要让同一组 source 同时在 Batch 和在线模式中执行，否则会重复计费。切换模式前应
 先取消仍在运行的 Batch，或从在线输入中明确排除 Batch 已完成的 source。
+
+EPIC-KITCHENS-100 全量实测中，完整视频源质检使用 20 个工作线程和 60 RPM 上限，
+受视频输入 TPM 约束，稳定完成吞吐约为 22 条/分钟；50 个工作线程会触发 TPM 限流。
+局部 30 秒片段请求平均更短，可使用 70 个工作线程和 120 RPM 上限，实测完成吞吐约
+为 117 条/分钟。以上数字只用于当前工作空间配额下的复现实例，其他账号仍应先小批
+测速，再按 429 和 TPM 情况调整。
