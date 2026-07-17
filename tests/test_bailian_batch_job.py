@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from scripts.bailian_batch_job import (  # noqa: E402
+    cancel_job,
     ensure_can_submit,
     require_api_key,
     sha256_file,
@@ -93,6 +94,37 @@ class BailianBatchJobTests(unittest.TestCase):
                 write_remote_file(Client(), "file-1", output, overwrite=False)
             self.assertFalse(output.exists())
             self.assertFalse(output.with_suffix(".jsonl.part").exists())
+
+    def test_cancel_is_idempotent_for_terminal_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "job.json"
+            path.write_text(
+                json.dumps({"batch_id": "batch-1", "status": "cancelled"}),
+                encoding="utf-8",
+            )
+            args = type(
+                "Args",
+                (),
+                {
+                    "job_record": str(path),
+                    "base_url": None,
+                    "api_key_env": "DASHSCOPE_API_KEY",
+                },
+            )()
+            terminal = {
+                "batch_id": "batch-1",
+                "status": "cancelled",
+                "request_counts": {"completed": 0, "failed": 0, "total": 1},
+            }
+            with patch(
+                "scripts.bailian_batch_job.make_client"
+            ) as make_client, patch(
+                "scripts.bailian_batch_job.refresh_job", return_value=terminal
+            ):
+                result = cancel_job(args)
+
+            self.assertEqual(result["status"], "cancelled")
+            make_client.return_value.batches.cancel.assert_not_called()
 
 
 if __name__ == "__main__":

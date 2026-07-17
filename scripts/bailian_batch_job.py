@@ -157,6 +157,24 @@ def status_job(args: argparse.Namespace) -> dict[str, Any]:
     return record
 
 
+def cancel_job(args: argparse.Namespace) -> dict[str, Any]:
+    job_path = Path(args.job_record)
+    record = read_job_record(job_path)
+    base_url = args.base_url or str(record.get("base_url") or DEFAULT_BASE_URL)
+    client = make_client(base_url, args.api_key_env)
+    record = refresh_job(client, record)
+    if record.get("status") in {"completed", "failed", "expired", "cancelled"}:
+        write_job_record(job_path, record)
+        return record
+    batch_id = str(record.get("batch_id") or "")
+    if not batch_id:
+        raise ValueError("Job record has no batch_id")
+    client.batches.cancel(batch_id)
+    record = refresh_job(client, record)
+    write_job_record(job_path, record)
+    return record
+
+
 def write_remote_file(client: Any, file_id: str, path: Path, overwrite: bool) -> None:
     if path.exists() and not overwrite:
         raise FileExistsError(f"Output already exists; use --overwrite: {path}")
@@ -239,6 +257,10 @@ def main() -> None:
     status.add_argument("--job-record", required=True)
     add_connection_args(status, optional_base_url=True)
 
+    cancel = subparsers.add_parser("cancel")
+    cancel.add_argument("--job-record", required=True)
+    add_connection_args(cancel, optional_base_url=True)
+
     download = subparsers.add_parser("download")
     download.add_argument("--job-record", required=True)
     download.add_argument("--output-jsonl")
@@ -251,6 +273,8 @@ def main() -> None:
         result = submit_job(args)
     elif args.command == "status":
         result = status_job(args)
+    elif args.command == "cancel":
+        result = cancel_job(args)
     else:
         result = download_job(args)
     print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)

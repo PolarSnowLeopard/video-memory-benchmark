@@ -423,3 +423,28 @@ wc -l "$RUN/bailian_source/request_manifest.jsonl"
 source Batch。后续源质检合并、局部视频复核和最终定稿仍按第 5 至第 8 节执行，
 但 `PROXY_CSV` 使用刷新后的 `proxy_540p16_urls_fresh.csv`，临时 COS 前缀使用独立
 版本目录，例如 `video-benchmark/qc-temp/epic100-precise-v2-20260718`。
+
+### 11.1 低延迟在线并发模式
+
+第 4 节的 Batch 模式成本较低，但并发由百炼后台动态调度，适合允许数小时到一天
+返回的离线任务。如果更重视完成时间，可以将同一份 `requests.jsonl` 送入在线并发
+执行器。该执行器使用滚动 RPM 限制、并发工作线程和指数退避，成功结果采用与 Batch
+下载文件相同的结构，因此后续仍直接使用 `merge_bailian_qc_results.py`。
+
+先用少量 source 实测视频请求吞吐，不要直接照搬文本任务的千级并发。视频输入通常
+先触及 TPM，而不是 RPM。
+
+```bash
+python3 scripts/bailian_online_jsonl.py \
+  --input-jsonl "$RUN/bailian_source/requests.jsonl" \
+  --output-jsonl "$RUN/bailian_source_online/results.jsonl" \
+  --error-jsonl "$RUN/bailian_source_online/errors.jsonl" \
+  --max-workers 20 \
+  --rpm 300 \
+  --limit 20
+```
+
+试跑通过后去掉 `--limit` 并按实测延迟提高 `--max-workers`。结果文件会在每个请求
+完成时立即追加并同步到磁盘；重复运行会跳过已有成功 `custom_id`，失败项会重新请求。
+不要让同一组 source 同时在 Batch 和在线模式中执行，否则会重复计费。切换模式前应
+先取消仍在运行的 Batch，或从在线输入中明确排除 Batch 已完成的 source。
