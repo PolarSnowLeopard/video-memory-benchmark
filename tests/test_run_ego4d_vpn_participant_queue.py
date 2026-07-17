@@ -134,6 +134,23 @@ class Ego4DVpnParticipantQueueTests(unittest.TestCase):
             )
             self.assertIsNone(detect_source_auth_error(log))
 
+    def test_ignores_authorization_errors_from_an_earlier_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "participant.log"
+            old_run = (
+                "botocore.exceptions.ClientError: An error occurred (403) when "
+                "calling the HeadObject operation: Forbidden\n"
+            )
+            current_run = "ERROR uid-2: Invalid proxy duration\n"
+            log.write_text(old_run + current_run, encoding="utf-8")
+
+            self.assertIsNone(
+                detect_source_auth_error(
+                    log,
+                    start_offset=len(old_run.encode("utf-8")),
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

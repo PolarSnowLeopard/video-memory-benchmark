@@ -146,18 +146,22 @@ def completed_manifest_video_count(url_csv: Path, manifest: Path) -> int:
     return len(expected & uploaded)
 
 
-def read_log_tail(path: Path, max_bytes: int = 1024 * 1024) -> str:
+def read_log_tail(
+    path: Path,
+    max_bytes: int = 1024 * 1024,
+    start_offset: int = 0,
+) -> str:
     if not path.exists():
         return ""
     with path.open("rb") as handle:
         handle.seek(0, 2)
         size = handle.tell()
-        handle.seek(max(0, size - max_bytes))
+        handle.seek(max(start_offset, size - max_bytes))
         return handle.read().decode("utf-8", errors="replace")
 
 
-def detect_source_auth_error(log_path: Path) -> str | None:
-    text = read_log_tail(log_path).casefold()
+def detect_source_auth_error(log_path: Path, start_offset: int = 0) -> str | None:
+    text = read_log_tail(log_path, start_offset=start_offset).casefold()
     if not any(marker in text for marker in SOURCE_AUTH_CONTEXT_MARKERS):
         return None
     return next(
@@ -347,6 +351,7 @@ def main() -> None:
             manifest = Path(item["manifest"])
             log_path = log_dir / f"{participant_slug(participant_id)}.log"
             log_file = log_path.open("a", encoding="utf-8")
+            log_start_offset = log_file.tell()
             started_at = utc_now()
             command = build_batch_command(manifest, participant_id, args)
             print(f"Starting {participant_id}: {subprocess.list2cmdline(command)}", flush=True)
@@ -363,6 +368,7 @@ def main() -> None:
                 "process": process,
                 "log_file": log_file,
                 "log_path": log_path,
+                "log_start_offset": log_start_offset,
                 "started_at": started_at,
             }
             upsert_csv(
@@ -404,7 +410,10 @@ def main() -> None:
             )
             status = "ok" if returncode == 0 and uploaded == expected else "error"
             auth_error = (
-                detect_source_auth_error(Path(item["log_path"]))
+                detect_source_auth_error(
+                    Path(item["log_path"]),
+                    int(item["log_start_offset"]),
+                )
                 if returncode != 0
                 else None
             )
