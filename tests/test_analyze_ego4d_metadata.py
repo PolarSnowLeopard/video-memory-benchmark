@@ -191,6 +191,25 @@ class Ego4DMetadataAnalysisTests(unittest.TestCase):
         self.assertEqual(candidate["candidate_status"], "excluded")
         self.assertIn("redaction_extent_unknown", candidate["exclusion_reasons"])
 
+    def test_download_access_audit_excludes_unavailable_video(self) -> None:
+        rows = self.normalized_rows()
+        summaries = build_participant_summaries(rows)
+        candidates = build_candidate_rows(
+            rows,
+            summaries,
+            CandidateFilters(min_videos_per_participant=1),
+            downloadable_video_uids={"video-a"},
+        )
+        unavailable = next(
+            row for row in candidates if row["video_uid"] == "video-b"
+        )
+
+        self.assertEqual(unavailable["candidate_status"], "excluded")
+        self.assertIn(
+            "unavailable_in_download_access_audit",
+            unavailable["exclusion_reasons"],
+        )
+
     def test_pilot_does_not_select_two_concurrent_views_for_one_participant(self) -> None:
         base = {
             "participant_id": "EGO4D_P000007",

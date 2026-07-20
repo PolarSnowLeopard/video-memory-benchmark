@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -45,6 +46,17 @@ SOURCE_AUTH_ERROR_MARKERS = (
     "unrecognizedclientexception",
     "the security token included in the request is expired",
     "the aws access key id you provided does not exist",
+)
+
+COS_FATAL_CONTEXT_MARKERS = (
+    "cosserviceerror",
+    "qcloud_cos",
+)
+
+COS_FATAL_ERROR_MARKERS = (
+    "<code>unavailableforlegalreasons</code>",
+    "due to your account is arrears",
+    "<code>accountisolated</code>",
 )
 
 
@@ -146,6 +158,22 @@ def completed_manifest_video_count(url_csv: Path, manifest: Path) -> int:
     return len(expected & uploaded)
 
 
+def prune_queue_status(path: Path, participant_ids: set[str]) -> int:
+    if not path.exists():
+        return 0
+    rows = read_csv(path)
+    selected = {participant.casefold() for participant in participant_ids}
+    retained = [
+        row
+        for row in rows
+        if row.get("participant_id", "").casefold() in selected
+    ]
+    removed = len(rows) - len(retained)
+    if removed:
+        write_csv(path, retained, QUEUE_STATUS_FIELDS)
+    return removed
+
+
 def read_log_tail(
     path: Path,
     max_bytes: int = 1024 * 1024,
@@ -168,6 +196,59 @@ def detect_source_auth_error(log_path: Path, start_offset: int = 0) -> str | Non
         (marker for marker in SOURCE_AUTH_ERROR_MARKERS if marker in text),
         None,
     )
+
+
+def detect_cos_fatal_error(log_path: Path, start_offset: int = 0) -> str | None:
+    text = read_log_tail(log_path, start_offset=start_offset).casefold()
+    if not any(marker in text for marker in COS_FATAL_CONTEXT_MARKERS):
+        return None
+    return next(
+        (marker for marker in COS_FATAL_ERROR_MARKERS if marker in text),
+        None,
+    )
+
+
+def detect_global_fatal_error(
+    log_path: Path,
+    start_offset: int = 0,
+) -> tuple[str, str] | None:
+    source_error = detect_source_auth_error(log_path, start_offset)
+    if source_error:
+        return "source_auth_error", source_error
+    cos_error = detect_cos_fatal_error(log_path, start_offset)
+    if cos_error:
+        return "cos_account_error", cos_error
+    return None
+
+
+def cos_write_preflight(client, bucket: str, key: str) -> None:
+    created = False
+    try:
+        client.put_object(Bucket=bucket, Key=key, Body=b"video-memory-benchmark")
+        created = True
+        client.head_object(Bucket=bucket, Key=key)
+    except Exception:
+        if created:
+            try:
+                client.delete_object(Bucket=bucket, Key=key)
+            except Exception:
+                pass
+        raise
+    client.delete_object(Bucket=bucket, Key=key)
+
+
+def verify_cos_writable(config_path: Path, prefix: str, run_name: str) -> None:
+    if __package__:
+        from .run_ego4d_vpn_batch import make_cos_client
+    else:
+        from run_ego4d_vpn_batch import make_cos_client
+
+    client, cos = make_cos_client(config_path)
+    key = (
+        f"{prefix.strip('/')}/_pipeline_health/"
+        f"{participant_slug(run_name)}-{uuid.uuid4().hex}.txt"
+    )
+    cos_write_preflight(client, cos["bucket"], key)
 
 
 def build_batch_command(manifest: Path, participant_id: str, args: argparse.Namespace) -> list[str]:
@@ -269,11 +350,24 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     manifests = discover_manifests(args.manifest_dir, args.participants)
+    if not args.dry_run:
+        print("Checking COS write access...", flush=True)
+        verify_cos_writable(args.cos_config, args.cos_prefix, args.run_name)
+        print("COS write access: ok", flush=True)
     queue_status = (
         args.data_root
         / "processed/ego4d_pipeline_runs"
         / f"{args.run_name}_status.csv"
     )
+    removed_status_rows = prune_queue_status(
+        queue_status,
+        {participant_id for participant_id, _, _ in manifests},
+    )
+    if removed_status_rows:
+        print(
+            f"Pruned {removed_status_rows} stale participant status rows.",
+            flush=True,
+        )
     log_dir = (
         args.data_root
         / "processed/ego4d_pipeline_runs"
@@ -334,7 +428,7 @@ def main() -> None:
         return
 
     active: dict[str, dict[str, object]] = {}
-    fatal_auth_error: tuple[str, str] | None = None
+    fatal_error: tuple[str, str, str] | None = None
 
     def handle_signal(signum, _frame) -> None:
         print(f"Received signal {signum}; terminating active workers.", flush=True)
@@ -409,18 +503,18 @@ def main() -> None:
                 Path(item["url_csv"]), Path(item["manifest"])
             )
             status = "ok" if returncode == 0 and uploaded == expected else "error"
-            auth_error = (
-                detect_source_auth_error(
+            detected_fatal_error = (
+                detect_global_fatal_error(
                     Path(item["log_path"]),
                     int(item["log_start_offset"]),
                 )
                 if returncode != 0
                 else None
             )
-            if auth_error:
-                status = "source_auth_error"
-                if fatal_auth_error is None:
-                    fatal_auth_error = (participant_id, auth_error)
+            if detected_fatal_error:
+                status, marker = detected_fatal_error
+                if fatal_error is None:
+                    fatal_error = (participant_id, status, marker)
             print(
                 f"Finished {participant_id}: {status}; uploaded={uploaded}/{expected}; rc={returncode}",
                 flush=True,
@@ -446,10 +540,20 @@ def main() -> None:
             finished.append(participant_id)
         for participant_id in finished:
             active.pop(participant_id)
-        if fatal_auth_error is not None:
-            failed_participant, marker = fatal_auth_error
+        if fatal_error is not None:
+            failed_participant, failure_status, marker = fatal_error
+            failure_label = (
+                "Ego4D source authorization"
+                if failure_status == "source_auth_error"
+                else "COS account availability"
+            )
+            blocked_status = (
+                "blocked_source_auth"
+                if failure_status == "source_auth_error"
+                else "blocked_cos_account"
+            )
             print(
-                "Fatal Ego4D source authorization failure detected for "
+                f"Fatal {failure_label} failure detected for "
                 f"{failed_participant} ({marker}); stopping the queue.",
                 flush=True,
             )
@@ -460,7 +564,7 @@ def main() -> None:
                 process.wait()
                 log_file = item["log_file"]
                 log_file.write(
-                    f"[{utc_now()}] Aborted after source authorization failure "
+                    f"[{utc_now()}] Aborted after {failure_label} failure "
                     f"in {failed_participant}\n"
                 )
                 log_file.close()
@@ -473,7 +577,7 @@ def main() -> None:
                     {
                         "updated_at": utc_now(),
                         "participant_id": participant_id,
-                        "status": "blocked_source_auth",
+                        "status": blocked_status,
                         "started_at": str(item["started_at"]),
                         "finished_at": utc_now(),
                         "returncode": str(process.returncode),
@@ -487,9 +591,14 @@ def main() -> None:
                     "participant_id",
                 )
             active.clear()
+            if failure_status == "source_auth_error":
+                raise SystemExit(
+                    "Ego4D source authorization failed. Renew or replace the AWS "
+                    "profile, validate one video, then rerun the same queue command."
+                )
             raise SystemExit(
-                "Ego4D source authorization failed. Renew or replace the AWS "
-                "profile, validate one video, then rerun the same queue command."
+                "COS account is unavailable. Restore COS write access, run the "
+                "write preflight, then rerun the same queue command."
             )
         if pending or active:
             time.sleep(args.poll_seconds)

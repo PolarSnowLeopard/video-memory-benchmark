@@ -11,9 +11,13 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.run_ego4d_vpn_participant_queue import (  # noqa: E402
     build_batch_command,
+    cos_write_preflight,
+    detect_cos_fatal_error,
+    detect_global_fatal_error,
     detect_source_auth_error,
     discover_manifests,
     output_url_csv,
+    prune_queue_status,
     source_manifest_participant,
 )
 
@@ -149,6 +153,98 @@ class Ego4DVpnParticipantQueueTests(unittest.TestCase):
                     log,
                     start_offset=len(old_run.encode("utf-8")),
                 )
+            )
+
+    def test_detects_cos_account_level_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "participant.log"
+            log.write_text(
+                "CosServiceError: <Code>UnavailableForLegalReasons</Code>"
+                "<Message>Due to your account is arrears, it is unavailable "
+                "until you recharge.</Message>\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                detect_cos_fatal_error(log),
+                "<code>unavailableforlegalreasons</code>",
+            )
+            self.assertEqual(
+                detect_global_fatal_error(log),
+                (
+                    "cos_account_error",
+                    "<code>unavailableforlegalreasons</code>",
+                ),
+            )
+
+    def test_does_not_treat_transient_cos_error_as_global_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "participant.log"
+            log.write_text(
+                "CosServiceError: RequestTimeout\n",
+                encoding="utf-8",
+            )
+            self.assertIsNone(detect_cos_fatal_error(log))
+            self.assertIsNone(detect_global_fatal_error(log))
+
+    def test_cos_write_preflight_creates_checks_and_deletes_probe(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def put_object(self, **kwargs) -> None:
+                self.calls.append(("put", kwargs))
+
+            def head_object(self, **kwargs) -> None:
+                self.calls.append(("head", kwargs))
+
+            def delete_object(self, **kwargs) -> None:
+                self.calls.append(("delete", kwargs))
+
+        client = FakeClient()
+        cos_write_preflight(client, "bucket-123", "prefix/probe.txt")
+
+        self.assertEqual(
+            [name for name, _ in client.calls],
+            ["put", "head", "delete"],
+        )
+        self.assertEqual(client.calls[0][1]["Bucket"], "bucket-123")
+        self.assertEqual(client.calls[0][1]["Key"], "prefix/probe.txt")
+
+    def test_prunes_status_rows_for_removed_participants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "status.csv"
+            fields = [
+                "updated_at",
+                "participant_id",
+                "status",
+                "started_at",
+                "finished_at",
+                "returncode",
+                "selected_videos",
+                "uploaded_videos",
+                "manifest",
+                "url_csv",
+                "log_path",
+            ]
+            with path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                writer.writerow(
+                    {"participant_id": "EGO4D_P000001", "status": "ok"}
+                )
+                writer.writerow(
+                    {"participant_id": "EGO4D_P000002", "status": "error"}
+                )
+
+            removed = prune_queue_status(path, {"EGO4D_P000001"})
+
+            self.assertEqual(removed, 1)
+            with path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(
+                [row["participant_id"] for row in rows],
+                ["EGO4D_P000001"],
             )
 
 

@@ -282,6 +282,28 @@ python3 scripts/analyze_ego4d_metadata.py \
   --pilot-participants 0 \
   --pilot-videos-per-participant 0
 
+# 用官方下载清单和当前许可逐对象验证可下载性；不在清单中或 HEAD
+# 返回 403/404 的视频不会进入正式 benchmark manifest。
+python3 scripts/audit_ego4d_download_access.py \
+  --source-manifest data/processed/ego4d/candidate_videos.csv \
+  --download-manifest "$EGO4D_ROOT/v2/video_540ss/manifest.csv" \
+  --output-csv data/processed/ego4d/download_access_audit.csv \
+  --available-video-uids-output data/processed/ego4d/downloadable_video_uids.txt \
+  --aws-profile ego4d \
+  --region us-west-1 \
+  --workers 16
+
+python3 scripts/analyze_ego4d_metadata.py \
+  --metadata-json "$EGO4D_METADATA" \
+  --output-dir data/processed/ego4d \
+  --min-duration-sec 300 \
+  --max-duration-sec 7200 \
+  --max-redaction-ratio 0.20 \
+  --min-videos-per-participant 3 \
+  --pilot-participants 0 \
+  --pilot-videos-per-participant 0 \
+  --download-access-audit-csv data/processed/ego4d/download_access_audit.csv
+
 python3 scripts/run_ego4d_vpn_participant_queue.py \
   --manifest-dir data/processed/ego4d/participant_manifests \
   --participants all \
@@ -302,6 +324,8 @@ python3 scripts/run_ego4d_vpn_participant_queue.py \
 CSV。中断后原命令重启即可；队列会跳过 URL 数量已经完整的参与者，子任务会跳过已完成视频。
 队列会识别官方 Ego4D 下载链路中的 AWS 403、过期令牌和无效密钥等全局鉴权错误。任一工作进程命中后，
 队列立即终止其他工作进程并保留尚未开始的参与者，避免把一次许可失效扩散成数百条参与者失败记录。
+启动工作进程前，队列还会向 COS 写入、读取并删除一个极小的健康检查对象；COS 欠费、账户隔离或写权限
+失效会在下载视频前直接终止。运行期间如果首次出现同类账户级错误，也会立即终止其余工作进程。
 
 许可或 AWS 凭据更新后，不要立即恢复 5 路队列。先更新 VPN 上的 `ego4d` profile，然后用一个尚未完成
 的 `video_uid` 运行单条批次，确认下载、转码、上传和清理均成功；最后原样重启全量队列。已有 URL 清单

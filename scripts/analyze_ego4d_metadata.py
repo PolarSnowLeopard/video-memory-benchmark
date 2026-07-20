@@ -603,6 +603,7 @@ def build_candidate_rows(
     video_rows: Sequence[dict[str, object]],
     participant_rows: Sequence[dict[str, object]],
     filters: CandidateFilters,
+    downloadable_video_uids: set[str] | None = None,
 ) -> list[dict[str, object]]:
     """Build candidates for an unordered same-wearer consistency pilot."""
     participant_by_id = {str(row["participant_id"]): row for row in participant_rows}
@@ -612,6 +613,11 @@ def build_candidate_rows(
         reasons: list[str] = []
         duration_sec = float(video["duration_sec"])
         participant = participant_by_id[str(video["participant_id"])]
+        if (
+            downloadable_video_uids is not None
+            and str(video["video_uid"]) not in downloadable_video_uids
+        ):
+            reasons.append("unavailable_in_download_access_audit")
         if not video["participant_known"]:
             reasons.append("unknown_participant")
         elif not participant["cross_video_consistency_eligible"]:
@@ -820,6 +826,8 @@ def analyze_metadata(
     *,
     pilot_participants: int = 5,
     pilot_videos_per_participant: int = 3,
+    downloadable_video_uids: set[str] | None = None,
+    download_access_audit_source: str | None = None,
 ) -> dict[str, object]:
     filters = filters or CandidateFilters()
     _validate_filters(filters)
@@ -844,7 +852,12 @@ def analyze_metadata(
     participant_rows = build_participant_summaries(video_rows)
     scenario_rows = build_scenario_summaries(video_rows, participant_rows)
     temporal_audit = build_temporal_order_audit(participant_rows)
-    candidate_rows = build_candidate_rows(video_rows, participant_rows, filters)
+    candidate_rows = build_candidate_rows(
+        video_rows,
+        participant_rows,
+        filters,
+        downloadable_video_uids,
+    )
     benchmark_rows = select_benchmark_rows(candidate_rows)
     pilot_rows = select_pilot_rows(
         benchmark_rows,
@@ -933,6 +946,24 @@ def analyze_metadata(
         "concurrent_video_count": sum(bool(row["concurrent_video_set_count"]) for row in video_rows),
         "scenario_count": len(scenario_rows),
         "candidate_filter": filters.as_dict(),
+        "download_access_filter_applied": downloadable_video_uids is not None,
+        "download_access_audit_source": download_access_audit_source,
+        "download_accessible_metadata_video_count": (
+            sum(
+                str(row["video_uid"]) in downloadable_video_uids
+                for row in video_rows
+            )
+            if downloadable_video_uids is not None
+            else None
+        ),
+        "download_inaccessible_metadata_video_count": (
+            sum(
+                str(row["video_uid"]) not in downloadable_video_uids
+                for row in video_rows
+            )
+            if downloadable_video_uids is not None
+            else None
+        ),
         "eligible_candidate_video_count": len(eligible_candidates),
         "eligible_candidate_participant_count": len(
             {str(row["participant_id"]) for row in eligible_candidates}
@@ -998,6 +1029,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--pilot-participants", type=int, default=5)
     parser.add_argument("--pilot-videos-per-participant", type=int, default=3)
+    parser.add_argument(
+        "--download-access-audit-csv",
+        type=Path,
+        help="Object-level access audit; only rows with status=available remain eligible.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1016,12 +1052,31 @@ def main(argv: Sequence[str] | None = None) -> None:
         require_audio=args.require_audio,
         scenarios=tuple(args.scenario),
     )
+    downloadable_video_uids = None
+    if args.download_access_audit_csv:
+        with args.download_access_audit_csv.open(newline="", encoding="utf-8") as file:
+            audit_rows = list(csv.DictReader(file))
+        downloadable_video_uids = {
+            row["video_uid"]
+            for row in audit_rows
+            if row.get("video_uid") and row.get("status") == "available"
+        }
+        if not downloadable_video_uids:
+            raise SystemExit(
+                f"No available videos found in {args.download_access_audit_csv}"
+            )
     report = analyze_metadata(
         metadata,
         args.output_dir,
         filters,
         pilot_participants=args.pilot_participants,
         pilot_videos_per_participant=args.pilot_videos_per_participant,
+        downloadable_video_uids=downloadable_video_uids,
+        download_access_audit_source=(
+            str(args.download_access_audit_csv)
+            if args.download_access_audit_csv
+            else None
+        ),
     )
     print(f"Ego4D metadata version: {report['metadata_version']}")
     print(f"Videos: {report['video_count']}")
